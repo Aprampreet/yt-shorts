@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api, asset } from './api';
 
-export default function OutputCard({ short, onUpdated, onRegenerate, onSchedule }) {
+export default function OutputCard({ short, onUpdated, onRegenerate }) {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [segments, setSegments] = useState(short.segments || []);
@@ -24,16 +24,6 @@ export default function OutputCard({ short, onUpdated, onRegenerate, onSchedule 
     try { await navigator.clipboard.writeText(text); setMessage('Copied to clipboard'); }
     catch { setMessage('Clipboard unavailable. Copy from the details below.'); }
   }
-  async function saveDraft() {
-    setBusy(true); setMessage('');
-    try { await api('/social/posts',{method:'POST',body:JSON.stringify({short_id:short.id,platform:'youtube',title:short.title,description:short.description,hashtags:short.hashtags,timezone:'Asia/Kolkata'})});setMessage('Saved as a YouTube draft. Review rights, then approve it in Schedule.');onSchedule(); }
-    catch(e){setMessage(e.message);} finally{setBusy(false);}
-  }
-  async function reviewRights() {
-    if (!window.confirm('I reviewed the final video and confirm source permission and music rights. Continue?')) return;
-    try {onUpdated(await api(`/shorts/${short.id}/rights-review?permission_verified=true&music_verified=true`,{method:'POST'}));setMessage('Rights review recorded. This is your declaration, not independent verification.');}
-    catch(e){setMessage(e.message);}
-  }
   async function metadata() {
     setBusy(true); setMessage('');
     try { onUpdated(await api(`/shorts/${short.id}/metadata`, { method: 'POST' })); }
@@ -46,12 +36,12 @@ export default function OutputCard({ short, onUpdated, onRegenerate, onSchedule 
       <span className="clip-number">0{short.short_number}</span><span className="clip-length">{short.duration.toFixed(1)}s</span></div>
     <div className="result-body"><div className="eyebrow">SOURCE HIGHLIGHT · {start}</div><h3>{short.title}</h3>
       <div className="scores"><span>Highlight <b>{short.quality_report.highlight_score ?? '—'}</b></span><span>Technical QA <b>{short.quality_score}/100</b></span></div>
-      <div className="review-label">◌ Manual rights review required</div>
+      <div className="review-label">◌ Source rights declaration on file</div>
       <a className="button download" href={asset(short.download_url)}>↓ Download MP4</a>
       <div className="result-actions"><button onClick={() => copy(short.title)}>Copy title</button><button onClick={() => copy(short.description)}>Copy description</button>
         {short.caption_url && <a href={asset(short.caption_url)}>SRT captions</a>}
         {short.caption_url && <a href={asset(short.caption_url + '?format=ass')}>ASS captions</a>}
-        <button disabled={busy} onClick={metadata}>{busy ? 'Generating…' : 'Regenerate metadata'}</button><button onClick={onRegenerate}>Regenerate job</button><button onClick={saveDraft}>Save YouTube draft</button><button onClick={reviewRights}>Record rights review</button></div>
+        <button disabled={busy} onClick={metadata}>{busy ? 'Generating…' : 'Regenerate metadata'}</button><button onClick={onRegenerate}>Regenerate job</button></div>
       {message && <p role="status" className="action-message">{message}</p>}
       {segments.length > 0 && <details className="transcript-editor"><summary>Review & edit transcript</summary>
         <p>Correct spoken text and translations. Saving re-renders the MP4 from the retained source.</p>

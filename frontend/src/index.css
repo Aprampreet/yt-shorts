@@ -551,6 +551,11 @@ footer span {
   cursor:pointer}
 .warning-panel p {
   line-height:1.7}
+.schedule-all {display:flex;align-items:center;justify-content:space-between;gap:20px;margin:24px 0;padding:20px;border:1px solid #536348;border-radius:7px;background:#20291e}
+.schedule-all strong {color:#dcf2c9;font-size:16px}
+.schedule-all p {color:#a4b39e;font-size:12px;line-height:1.6;max-width:650px;margin:8px 0 0}
+.schedule-all button {flex:none}
+@media(max-width:760px){.schedule-all{flex-direction:column;align-items:stretch}.schedule-all button{white-space:normal}}
 .results {
   margin-top:38px}
 .secondary {

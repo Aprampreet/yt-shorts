@@ -493,7 +493,96 @@ class BatchApprovalTests(TestCase):
             self.assertEqual(client.post(url,json.dumps(payload),content_type='application/json').status_code,409)
 
 
+class OneClickSchedulingTests(TestCase):
+    def setUp(self):
+        from .models import ConnectedSocialAccount
+        self.client.get('/api/v1/session')
+        self.owner = self.client.session['studio_owner']
+        self.tmp = tempfile.TemporaryDirectory()
+        self.media = override_settings(MEDIA_ROOT=Path(self.tmp.name)); self.media.enable()
+        source = SourceVideo.objects.create(source_type='upload', title='Source', rights_declaration=True)
+        self.job = GenerationJob.objects.create(source=source, owner=self.owner, status='needs_review')
+        self.account = ConnectedSocialAccount.objects.create(owner=self.owner, platform='youtube',
+            platform_account_id='channel', account_name='Channel', encrypted_credentials='encrypted')
+        for number in (1, 2, 3):
+            path = Path(self.tmp.name) / f'{number}.mp4'; path.write_bytes(b'video')
+            GeneratedShort.objects.create(job=self.job, short_number=number, start_time=0, end_time=20,
+                duration=20, title=f'Short {number}', description='Grounded description',
+                hashtags=['#Shorts'], transcript='Actual spoken words', video_file=path.name)
+
+    def tearDown(self):
+        self.media.disable(); self.tmp.cleanup()
+
+    @patch('api.views.publish_youtube_post.delay')
+    def test_one_click_sets_slots_and_is_idempotent(self, enqueue):
+        from .models import ScheduledPost
+        url = f'/api/v1/jobs/{self.job.id}/schedule-batch'
+        with self.captureOnCommitCallbacks(execute=True):
+            first = self.client.post(url)
+        self.assertEqual(first.status_code, 202, first.content)
+        posts = first.json()['posts']
+        self.assertEqual([p['status'] for p in posts], ['queued'] * 3)
+        self.assertEqual([p['approval_basis'] for p in posts], ['source_declaration'] * 3)
+        self.assertIsNone(posts[0]['scheduled_at'])
+        from datetime import datetime, timedelta
+        second = datetime.fromisoformat(posts[1]['scheduled_at'])
+        third = datetime.fromisoformat(posts[2]['scheduled_at'])
+        self.assertEqual(third-second, timedelta(hours=5))
+        self.assertAlmostEqual((second-timezone.now()).total_seconds(), 5*3600, delta=15)
+        self.assertEqual(enqueue.call_count, 3)
+        again = self.client.post(url)
+        self.assertEqual(again.status_code, 202)
+        self.assertTrue(again.json()['already_scheduled'])
+        self.assertEqual(ScheduledPost.objects.count(), 3)
+        self.assertEqual(enqueue.call_count, 3)
+
+    def test_missing_account_or_declaration_blocks_upload(self):
+        from .models import ScheduledPost
+        self.account.connection_status = 'disconnected'; self.account.save()
+        response = self.client.post(f'/api/v1/jobs/{self.job.id}/schedule-batch')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(ScheduledPost.objects.count(), 0)
+        self.account.connection_status = 'connected'; self.account.save()
+        self.job.source.rights_declaration = False; self.job.source.save()
+        self.assertEqual(self.client.post(f'/api/v1/jobs/{self.job.id}/schedule-batch').status_code, 409)
+        self.assertEqual(ScheduledPost.objects.count(), 0)
+
+    @patch('api.views.publish_youtube_post.delay')
+    def test_existing_published_short_is_not_reuploaded(self, enqueue):
+        from .models import ScheduledPost
+        first = self.job.shorts.get(short_number=1)
+        ScheduledPost.objects.create(owner=self.owner, generated_short=first, social_account=self.account,
+            platform='youtube', title=first.title, description=first.description, status='published',
+            approved_at=timezone.now(), external_post_id='abcdefghijk')
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f'/api/v1/jobs/{self.job.id}/schedule-batch')
+        self.assertEqual(response.status_code, 202, response.content)
+        self.assertEqual([p['status'] for p in response.json()['posts']], ['published', 'queued', 'queued'])
+        self.assertEqual(enqueue.call_count, 2)
+        self.assertEqual(ScheduledPost.objects.count(), 3)
+
+
 class PublicationStateTests(TestCase):
+    def test_source_declaration_authorizes_one_click_upload(self):
+        from .models import ConnectedSocialAccount, ScheduledPost
+        from .tasks import publish_youtube_post
+        with tempfile.TemporaryDirectory() as tmp, override_settings(MEDIA_ROOT=Path(tmp)):
+            source = SourceVideo.objects.create(rights_declaration=True)
+            job = GenerationJob.objects.create(source=source, owner='owner', status='needs_review')
+            (Path(tmp)/'short.mp4').write_bytes(b'rendered-video')
+            short = GeneratedShort.objects.create(job=job, short_number=1, start_time=0, end_time=20,
+                duration=20, title='Clip', video_file='short.mp4')
+            account = ConnectedSocialAccount.objects.create(owner='owner', platform='youtube',
+                platform_account_id='channel', account_name='Channel', encrypted_credentials='encrypted')
+            post = ScheduledPost.objects.create(owner='owner', generated_short=short, social_account=account,
+                platform='youtube', title='Clip', description='Context', status='queued',
+                approval_basis='source_declaration', approved_at=timezone.now())
+            with patch('api.services.social.youtube_upload', return_value=('abcdefghijk','public')) as upload:
+                publish_youtube_post(str(post.id))
+            upload.assert_called_once()
+            post.refresh_from_db()
+            self.assertEqual(post.status, 'published')
+
     def test_private_upload_is_not_reported_as_published_and_is_idempotent(self):
         from .models import ConnectedSocialAccount, ScheduledPost
         from .tasks import publish_youtube_post
@@ -538,3 +627,37 @@ class CaptionRequirementTests(TestCase):
             cues = parse_vtt(path)
             self.assertEqual(len(cues),1)
             self.assertEqual(cues[0]['text'],'Hello world')
+
+
+class GroqFormattingTests(SimpleTestCase):
+    def test_metadata_hashtags_are_sanitized_and_failures_fall_back(self):
+        from .services.groq import generate_metadata
+        response = Mock()
+        response.json.return_value = {'choices':[{'message':{'content':json.dumps({
+            'title':'A grounded gameplay moment', 'description':'The speaker explains the mission route.',
+            'hashtags':['#Gaming','#Shorts','#Gaming','#ViceCity']})}}]}
+        with patch.dict(os.environ, {'GROQ_API_KEY':'test-key','GROQ_ENABLED':'true'}), \
+             patch('api.services.groq.httpx.post', return_value=response):
+            result = generate_metadata('The speaker explains the mission route.', 'Gameplay')
+        self.assertEqual(result['hashtags'], ['#Gaming','#Shorts','#ViceCity'])
+        with patch.dict(os.environ, {'GROQ_API_KEY':'test-key','GROQ_ENABLED':'true'}), \
+             patch('api.services.groq.httpx.post', side_effect=__import__('httpx').ConnectError('offline')):
+            self.assertIsNone(generate_metadata('Actual words', 'Gameplay'))
+
+    def test_word_timestamps_form_short_caption_phrases(self):
+        from .services.groq import transcribe_clip
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'GROQ_API_KEY': 'test-key', 'GROQ_ENABLED': 'true'}):
+            audio = Path(tmp)
+            response = Mock()
+            response.json.return_value = {'words': [
+                {'word':'Hello','start':0.1,'end':0.4},
+                {'word':'everyone','start':0.45,'end':0.9},
+                {'word':'Welcome','start':1.7,'end':2.1},
+                {'word':'back','start':2.15,'end':2.5}], 'segments': []}
+            def make_audio(*args, **kwargs):
+                (audio/'groq-1.flac').write_bytes(b'fake-audio')
+            with patch('api.services.groq.run', side_effect=make_audio), patch('api.services.groq.httpx.post', return_value=response):
+                cues = transcribe_clip(Path(tmp)/'source.mp4', audio, 10, 3, 1)
+            self.assertEqual([cue['text'] for cue in cues], ['Hello everyone', 'Welcome back'])
+            self.assertEqual(cues[0]['end'], 0.9)
+            self.assertFalse((audio/'groq-1.flac').exists())

@@ -105,6 +105,7 @@ class ScheduledPost(models.Model):
     timezone = models.CharField(max_length=60, default='Asia/Kolkata')
     status = models.CharField(max_length=30, default='draft', db_index=True)
     approved_at = models.DateTimeField(null=True)
+    approval_basis = models.CharField(max_length=30, default='manual_review')
     retry_count = models.PositiveSmallIntegerField(default=0)
     last_error = models.TextField(blank=True)
     external_post_id = models.CharField(max_length=200, blank=True)

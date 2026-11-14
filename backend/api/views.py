@@ -352,14 +352,23 @@ def captions(request, short_id: uuid.UUID, format: Literal['srt','ass'] = 'srt')
 @api.post('/v1/shorts/{short_id}/metadata')
 def refresh_metadata(request, short_id: uuid.UUID):
     from .services.providers import HuggingFaceProvider
+    from .services.groq import generate_metadata
     short = owned_short(request, short_id)
     if not short.transcript:
         raise StudioError('transcript_required', 'No transcript is available for grounded metadata generation.')
-    data = HuggingFaceProvider().analyze(short.transcript)
-    short.title = data['title_candidates'][0][:500]
-    short.description = data['description'] + '\n\nSource: ' + (short.job.source.source_url or short.job.source.title)
-    short.hashtags = data['hashtags']
-    short.quality_report = dict(short.quality_report, title_candidates=data['title_candidates'])
+    data = generate_metadata(short.transcript, short.job.source.title,
+                             short.job.source.source_metadata.get('description') or '')
+    if data:
+        short.title = data['title']
+        short.description = data['description'] + '\n\nSource: ' + (short.job.source.source_url or short.job.source.title)
+        short.hashtags = data['hashtags']
+        short.quality_report = dict(short.quality_report, title_candidates=[short.title], metadata_source='groq')
+    else:
+        data = HuggingFaceProvider().analyze(short.transcript)
+        short.title = data['title_candidates'][0][:500]
+        short.description = data['description'] + '\n\nSource: ' + (short.job.source.source_url or short.job.source.title)
+        short.hashtags = data['hashtags']
+        short.quality_report = dict(short.quality_report, title_candidates=data['title_candidates'])
     short.save()
     return short_data(short)
 
@@ -440,7 +449,8 @@ def post_data(post):
             'title':post.title,'description':post.description,'hashtags':post.hashtags,
             'scheduled_at':post.scheduled_at.isoformat() if post.scheduled_at else None,
             'timezone':post.timezone,'status':post.status,'last_error':post.last_error,
-            'retry_count':post.retry_count,'published_url':post.published_url}
+            'retry_count':post.retry_count,'published_url':post.published_url,
+            'approval_basis':post.approval_basis}
 
 
 @api.get('/v1/social/accounts')
@@ -533,18 +543,99 @@ def enqueue_social_post(post_id):
         ScheduledPost.objects.filter(pk=post_id,status='queued').update(status='failed',last_error='Social worker is unavailable. Start Redis and the Celery worker, then retry.')
 
 
+@api.post('/v1/jobs/{job_id}/schedule-batch', response={202: dict})
+def schedule_job_batch(request, job_id: uuid.UUID):
+    """One explicit user action queues the generated Shorts at 0, 5 and 10 hours."""
+    with transaction.atomic():
+        job = get_object_or_404(GenerationJob.objects.select_for_update().select_related('source'),
+                                pk=job_id, owner=request.auth)
+        if job.status not in {'needs_review', 'completed'}:
+            raise HttpError(409, 'Wait until generation finishes before scheduling.')
+        if not job.source.rights_declaration:
+            raise HttpError(409, 'The source has no rights declaration. Use an authorized source.')
+        shorts = list(job.shorts.all().order_by('short_number'))
+        if not shorts or len(shorts) > 3:
+            raise HttpError(409, 'No finished Shorts are available to schedule.')
+        if any(not s.video_file or not (settings.MEDIA_ROOT / s.video_file).is_file() or
+               s.quality_report.get('transcript_edit_status') == 'rendering' for s in shorts):
+            raise HttpError(409, 'A video is missing or still rendering. Try again when it is ready.')
+        accounts = list(ConnectedSocialAccount.objects.filter(owner=request.auth, platform='youtube',
+                                                               connection_status='connected'))
+        if len(accounts) != 1:
+            raise HttpError(409, 'Connect exactly one YouTube channel in Schedule before using one-click scheduling.')
+        account = accounts[0]
+        existing = list(ScheduledPost.objects.select_for_update().filter(
+            generated_short__in=shorts, platform='youtube'))
+        active = [p for p in existing if p.status in {'queued','uploading','scheduled','published','uploaded_private'}]
+        if any(p.social_account_id != account.id for p in active):
+            raise HttpError(409, 'A Short is already queued or uploaded to another YouTube channel.')
+        if len(active) == len(shorts):
+            return 202, {'posts': [post_data(next(p for p in active if p.generated_short_id == s.id)) for s in shorts],
+                         'already_scheduled': True, 'already_uploaded': len([p for p in active if p.external_post_id])}
+        from .services.groq import enabled as groq_enabled, generate_metadata
+        if groq_enabled():
+            for short in shorts:
+                if short.id not in {post.generated_short_id for post in active} and short.transcript and short.quality_report.get('metadata_source') != 'groq':
+                    generated = generate_metadata(short.transcript, job.source.title,
+                                                   job.source.source_metadata.get('description') or '')
+                    if generated:
+                        short.title = generated['title']
+                        short.description = generated['description'] + '\n\nSource: ' + (job.source.source_url or job.source.title)
+                        short.hashtags = generated['hashtags']
+                        short.quality_report = dict(short.quality_report, metadata_source='groq')
+                        short.save(update_fields=['title','description','hashtags','quality_report'])
+        now = timezone.now()
+        posts_to_enqueue = []
+        posts = []
+        for index, short in enumerate(shorts):
+            current = next((p for p in active if p.generated_short_id == short.id), None)
+            if current:
+                posts.append(current)
+                continue
+            prior = next((p for p in existing if p.generated_short_id == short.id and
+                          (p.social_account_id in {None, account.id})), None)
+            if prior is None and any(p.generated_short_id == short.id for p in existing):
+                raise HttpError(409, 'A Short already has a draft for another YouTube channel.')
+            if prior and prior.external_post_id:
+                raise HttpError(409, 'A Short was already uploaded. Open Schedule to check it.')
+            # Existing drafts keep their record, but use the current generated metadata and slots.
+            post = prior or ScheduledPost(owner=request.auth, generated_short=short, platform='youtube')
+            post.social_account = account
+            post.title = short.title[:100]
+            post.description = short.description
+            post.hashtags = short.hashtags[:5]
+            post.scheduled_at = now + timedelta(hours=5 * index) if index else None
+            post.timezone = 'Asia/Kolkata'
+            post.status = 'queued'
+            post.approved_at = now
+            post.approval_basis = 'source_declaration'
+            post.last_error = ''
+            post.save()
+            posts.append(post)
+            posts_to_enqueue.append(post.id)
+        transaction.on_commit(lambda: [enqueue_social_post(post_id) for post_id in posts_to_enqueue])
+    return 202, {'posts': [post_data(post) for post in posts], 'already_scheduled': False,
+                 'already_uploaded': len([post for post in active if post.external_post_id])}
+
+
 @api.post('/v1/social/posts/{post_id}/approve', response={202: dict})
 def approve_post(request, post_id: uuid.UUID):
     post = get_object_or_404(ScheduledPost.objects.select_related('generated_short'),pk=post_id,owner=request.auth)
     if post.status not in ['draft','failed']:
         raise HttpError(409,'Only draft or failed posts can be approved.')
-    if not post.generated_short or post.generated_short.rights_review_status != 'rights_documented':
+    if not post.generated_short or not (
+        post.generated_short.rights_review_status == 'rights_documented' or
+        post.approval_basis == 'source_declaration' and post.generated_short.job.source.rights_declaration
+    ):
         raise HttpError(409,'Complete and document the final rights review before approving publication.')
-    if post.scheduled_at and post.scheduled_at <= timezone.now()+timedelta(minutes=10):
+    if post.scheduled_at and post.scheduled_at <= timezone.now()+timedelta(minutes=10) and post.status != 'failed':
         raise HttpError(422,'Scheduled time is too close or has passed. Edit the draft before approving.')
     if not post.social_account or post.social_account.connection_status != 'connected':
         raise HttpError(409,'Connect an eligible destination account first.')
     with transaction.atomic():
+        if post.status == 'failed' and post.scheduled_at and post.scheduled_at <= timezone.now()+timedelta(minutes=10):
+            post.scheduled_at = None
+            post.save(update_fields=['scheduled_at'])
         if not ScheduledPost.objects.filter(pk=post.pk,status__in=['draft','failed']).update(status='queued',approved_at=timezone.now(),last_error=''):
             raise HttpError(409,'Post was already approved.')
     enqueue_social_post(post.id)

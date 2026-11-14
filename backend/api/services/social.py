@@ -95,7 +95,11 @@ def youtube_upload(post, path):
         status = {'privacyStatus':'private' if post.scheduled_at else 'public'}
         if post.scheduled_at:
             status['publishAt'] = post.scheduled_at.isoformat().replace('+00:00','Z')
-        body = {'snippet':{'title':post.title[:100],'description':post.description[:5000],
+        visible_tags = ' '.join(tag for tag in post.hashtags if tag.startswith('#'))
+        description = post.description.strip()
+        if visible_tags:
+            description = (description + '\n\n' + visible_tags)[:5000]
+        body = {'snippet':{'title':post.title[:100],'description':description[:5000],
                            'tags':[tag.lstrip('#') for tag in post.hashtags]}, 'status':status}
         with httpx.Client(timeout=30) as client:
             response = client.post(UPLOAD_API,params={'uploadType':'resumable','part':'snippet,status'},

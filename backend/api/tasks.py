@@ -14,6 +14,7 @@ from .services.captions import local_cues, write_captions
 from .services.local_transcription import transcribe_source
 from .services.languages import label_cues, caption_text
 from .services.providers import HuggingFaceProvider
+from .services.groq import enabled as groq_enabled, generate_metadata, transcribe_clip
 from .services.rendering import render_command, validate_output
 
 log = logging.getLogger(__name__)
@@ -156,6 +157,15 @@ def generate_job(job_id):
         for number, candidate in enumerate(selected, 1):
             update(job, 'editing', f'Preparing Short {number} of {len(selected)}', 44+(number-1)*15)
             clip_cues = local_cues(cues, candidate['start'], candidate['end'])
+            caption_timing = job.analysis['transcription_timing']
+            if info['has_audio'] and groq_enabled():
+                improved = transcribe_clip(source, folders['audio'], candidate['start'],
+                                           candidate['end']-candidate['start'], number)
+                if improved:
+                    clip_cues = label_cues(improved)
+                    caption_timing = ('Groq word timestamps used for caption phrases.' if
+                                      improved[0]['timing'] == 'groq_word' else
+                                      'Groq segment timestamps used; phrase subdivisions are approximate.')
             text = ' '.join(c['text'] for c in clip_cues)
             editorial = candidate.get('editorial')
             if not editorial and text and os.getenv('HF_TEXT_MODEL') and os.getenv('HF_TOKEN'):
@@ -217,6 +227,9 @@ def generate_job(job_id):
             thumbnail = folders['thumbnails']/f'{number}.jpg'
             run(['ffmpeg', '-nostdin', '-y', '-ss', min(1,duration/2), '-i', output, '-frames:v', '1', '-vf', 'scale=270:480', thumbnail])
             title = editorial['title_candidates'][0][:500] if editorial else (text[:85] or f'{s.title[:75]} · Highlight {number}')
+            groq_metadata = generate_metadata(text, s.title, metadata.get('description') or '')
+            if groq_metadata:
+                title = groq_metadata['title']
             attribution = f'Source: {s.source_url or s.title}. Source-based highlight; ownership and monetization require review.'
             report['rights_review'] = {
                 'source_url': s.source_url, 'original_creator': metadata.get('uploader') or metadata.get('channel') or 'Not independently verified',
@@ -233,20 +246,22 @@ def generate_job(job_id):
                     'Restrained color adjustment', 'Audio normalization and peak limiting' if info['has_audio'] else 'No source audio',
                     'Animated phrase captions (approximate subdivisions)' if ass else 'No captions available'],
                 title_candidates=editorial['title_candidates'] if editorial else [title],
-                file_size=output.stat().st_size, caption_timing=job.analysis['transcription_timing'],
+                metadata_source='groq' if groq_metadata else 'existing',
+                file_size=output.stat().st_size, caption_timing=caption_timing,
                 original_commentary=commentary)
             update(job, 'validating', f'Saving validated Short {number}', 56+(number-1)*15)
             short, _ = GeneratedShort.objects.update_or_create(job=job, short_number=number, defaults=dict(
                 start_time=candidate['start'], end_time=candidate['end'], duration=duration,
-                title=title, description=((editorial['description']+'\n\n') if editorial else '')+attribution,
-                hashtags=editorial['hashtags'] if editorial else ['#Shorts'], transcript=text,
+                title=title, description=((groq_metadata['description']+'\n\n') if groq_metadata else
+                    (editorial['description']+'\n\n') if editorial else '')+attribution,
+                hashtags=groq_metadata['hashtags'] if groq_metadata else editorial['hashtags'] if editorial else ['#Shorts'], transcript=text,
                 caption_file=relative(srt) if srt else '', video_file=relative(output), thumbnail_file=relative(thumbnail),
                 quality_score=report['score'], quality_report=report, rights_review_status='manual_review_required'))
             short.segments.all().delete()
             TranscriptSegment.objects.bulk_create([TranscriptSegment(short=short,
                 start_ms=round(c['start']*1000), end_ms=round(c['end']*1000), original_text=c['text'],
                 translated_english=c.get('translated_english',''), translated_hindi=c.get('translated_hindi',''),
-                detected_language=c.get('detected_language') or 'und', confidence=c.get('confidence')) for c in local_cues(cues,candidate['start'],candidate['end'])])
+                detected_language=c.get('detected_language') or 'und', confidence=c.get('confidence')) for c in clip_cues])
         mark('rendering_and_qa', tick)
         job.analysis.update(warnings=warnings, timings=timings, inference_calls=provider.calls,
             total_seconds=round(time.monotonic()-started,2), disk_bytes=disk_check(root))
@@ -323,12 +338,15 @@ def publish_youtube_post(post_id):
     if not ScheduledPost.objects.filter(pk=post_id,status='queued',approved_at__isnull=False,
         external_post_id='').update(status='uploading'):
         return
-    post = ScheduledPost.objects.select_related('generated_short','social_account').get(pk=post_id)
+    post = ScheduledPost.objects.select_related('generated_short__job__source','social_account').get(pk=post_id)
     try:
         if post.platform != 'youtube' or not post.social_account or post.social_account.connection_status != 'connected':
             raise StudioError('account_unavailable','A connected YouTube account is required.')
-        if not post.generated_short or post.generated_short.rights_review_status != 'rights_documented':
-            raise StudioError('rights_unresolved','Rights review is no longer documented.')
+        if not post.generated_short or not (
+            post.generated_short.rights_review_status == 'rights_documented' or
+            post.approval_basis == 'source_declaration' and post.generated_short.job.source.rights_declaration
+        ):
+            raise StudioError('rights_unresolved','The source rights declaration is unavailable.')
         video = settings.MEDIA_ROOT/post.generated_short.video_file
         if not video.is_file():
             raise StudioError('video_expired','The approved video expired; render it again before uploading.')
@@ -342,6 +360,18 @@ def publish_youtube_post(post_id):
     except Exception as exc:
         log.exception('YouTube upload failed for post %s',post_id)
         post.retry_count += 1
+        import httpx
+        status_code = getattr(getattr(exc, 'response', None), 'status_code', None)
+        transient = isinstance(exc, httpx.TransportError) or status_code in {429, 500, 502, 503, 504}
+        if transient and post.retry_count < 3:
+            post.status = 'queued'
+            post.last_error = 'Temporary YouTube upload error. Retrying automatically.'
+            post.save(update_fields=['retry_count','status','last_error'])
+            try:
+                publish_youtube_post.apply_async(args=[post_id], countdown=30 * 2 ** (post.retry_count-1))
+                return
+            except Exception:
+                log.exception('Could not enqueue YouTube retry for post %s', post_id)
         post.status = 'failed'
         post.last_error = getattr(exc,'message','YouTube upload failed. Review account, quota and worker logs.')
         post.save(update_fields=['retry_count','status','last_error'])

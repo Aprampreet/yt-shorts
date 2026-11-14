@@ -4,6 +4,20 @@ from django.core.exceptions import ImproperlyConfigured
 import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+env_file = BASE_DIR.parent / '.env'
+if env_file.is_file():
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        name, value = line.split('=', 1)
+        name, value = name.strip(), value.strip()
+        if not name.isidentifier():
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        if not os.environ.get(name):
+            os.environ[name] = value
 DEBUG = os.getenv('DJANGO_DEBUG', 'false').lower() == 'true'
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', '')
 if not SECRET_KEY:
