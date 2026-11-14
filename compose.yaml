@@ -1,0 +1,49 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy noeviction
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+  migrate:
+    build: ./backend
+    env_file: .env
+    environment: &backend-env
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:////data/db.sqlite3
+      MEDIA_ROOT: /data/media
+    volumes: [studio-data:/data]
+    command: python manage.py migrate --noinput
+  api:
+    build: ./backend
+    env_file: .env
+    environment: *backend-env
+    volumes: [studio-data:/data]
+    depends_on:
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  worker:
+    build: ./backend
+    env_file: .env
+    environment: *backend-env
+    volumes: [studio-data:/data]
+    command: celery -A backend worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1
+    cpus: 2
+    mem_limit: 2g
+    depends_on:
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  web:
+    build: ./frontend
+    ports: [127.0.0.1:8080:80]
+    depends_on: [api]
+    restart: unless-stopped
+volumes:
+  studio-data:
+  redis-data:
