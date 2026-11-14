@@ -352,21 +352,20 @@ def captions(request, short_id: uuid.UUID, format: Literal['srt','ass'] = 'srt')
 @api.post('/v1/shorts/{short_id}/metadata')
 def refresh_metadata(request, short_id: uuid.UUID):
     from .services.providers import HuggingFaceProvider
-    from .services.groq import generate_metadata
+    from .services.groq import finalize_description, generate_metadata
     short = owned_short(request, short_id)
     if not short.transcript:
         raise StudioError('transcript_required', 'No transcript is available for grounded metadata generation.')
-    data = generate_metadata(short.transcript, short.job.source.title,
-                             short.job.source.source_metadata.get('description') or '')
+    data = generate_metadata(short.transcript)
     if data:
         short.title = data['title']
-        short.description = data['description'] + '\n\nSource: ' + (short.job.source.source_url or short.job.source.title)
+        short.description = finalize_description(data['description'], data['hashtags'])
         short.hashtags = data['hashtags']
         short.quality_report = dict(short.quality_report, title_candidates=[short.title], metadata_source='groq')
     else:
         data = HuggingFaceProvider().analyze(short.transcript)
         short.title = data['title_candidates'][0][:500]
-        short.description = data['description'] + '\n\nSource: ' + (short.job.source.source_url or short.job.source.title)
+        short.description = finalize_description(data['description'], data['hashtags'])
         short.hashtags = data['hashtags']
         short.quality_report = dict(short.quality_report, title_candidates=data['title_candidates'])
     short.save()
@@ -572,18 +571,24 @@ def schedule_job_batch(request, job_id: uuid.UUID):
         if len(active) == len(shorts):
             return 202, {'posts': [post_data(next(p for p in active if p.generated_short_id == s.id)) for s in shorts],
                          'already_scheduled': True, 'already_uploaded': len([p for p in active if p.external_post_id])}
-        from .services.groq import enabled as groq_enabled, generate_metadata
+        from .services.groq import enabled as groq_enabled, finalize_description, generate_metadata
         if groq_enabled():
             for short in shorts:
                 if short.id not in {post.generated_short_id for post in active} and short.transcript and short.quality_report.get('metadata_source') != 'groq':
-                    generated = generate_metadata(short.transcript, job.source.title,
-                                                   job.source.source_metadata.get('description') or '')
+                    generated = generate_metadata(short.transcript)
                     if generated:
                         short.title = generated['title']
-                        short.description = generated['description'] + '\n\nSource: ' + (job.source.source_url or job.source.title)
+                        short.description = finalize_description(generated['description'], generated['hashtags'])
                         short.hashtags = generated['hashtags']
                         short.quality_report = dict(short.quality_report, metadata_source='groq')
                         short.save(update_fields=['title','description','hashtags','quality_report'])
+        for short in shorts:
+            if short.id in {post.generated_short_id for post in active}:
+                continue
+            cleaned = finalize_description(short.description, short.hashtags)
+            if cleaned != short.description:
+                short.description = cleaned
+                short.save(update_fields=['description'])
         now = timezone.now()
         posts_to_enqueue = []
         posts = []
@@ -602,7 +607,7 @@ def schedule_job_batch(request, job_id: uuid.UUID):
             post = prior or ScheduledPost(owner=request.auth, generated_short=short, platform='youtube')
             post.social_account = account
             post.title = short.title[:100]
-            post.description = short.description
+            post.description = finalize_description(short.description, short.hashtags)
             post.hashtags = short.hashtags[:5]
             post.scheduled_at = now + timedelta(hours=5 * index) if index else None
             post.timezone = 'Asia/Kolkata'

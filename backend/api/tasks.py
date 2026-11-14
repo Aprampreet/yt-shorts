@@ -14,7 +14,7 @@ from .services.captions import local_cues, write_captions
 from .services.local_transcription import transcribe_source
 from .services.languages import label_cues, caption_text
 from .services.providers import HuggingFaceProvider
-from .services.groq import enabled as groq_enabled, generate_metadata, transcribe_clip
+from .services.groq import enabled as groq_enabled, finalize_description, generate_metadata, transcribe_clip
 from .services.rendering import render_command, validate_output
 
 log = logging.getLogger(__name__)
@@ -227,10 +227,13 @@ def generate_job(job_id):
             thumbnail = folders['thumbnails']/f'{number}.jpg'
             run(['ffmpeg', '-nostdin', '-y', '-ss', min(1,duration/2), '-i', output, '-frames:v', '1', '-vf', 'scale=270:480', thumbnail])
             title = editorial['title_candidates'][0][:500] if editorial else (text[:85] or f'{s.title[:75]} · Highlight {number}')
-            groq_metadata = generate_metadata(text, s.title, metadata.get('description') or '')
+            groq_metadata = generate_metadata(text)
             if groq_metadata:
                 title = groq_metadata['title']
-            attribution = f'Source: {s.source_url or s.title}. Source-based highlight; ownership and monetization require review.'
+            hashtags = groq_metadata['hashtags'] if groq_metadata else editorial['hashtags'] if editorial else ['#Shorts']
+            base_description = groq_metadata['description'] if groq_metadata else editorial['description'] if editorial else (
+                'A standout moment from this Short: ' + (text[:220].rstrip() or 'watch the moment unfold.'))
+            description = finalize_description(base_description, hashtags)
             report['rights_review'] = {
                 'source_url': s.source_url, 'original_creator': metadata.get('uploader') or metadata.get('channel') or 'Not independently verified',
                 'rights_declaration': s.rights_declaration, 'permission_reference': s.permission_reference,
@@ -252,9 +255,7 @@ def generate_job(job_id):
             update(job, 'validating', f'Saving validated Short {number}', 56+(number-1)*15)
             short, _ = GeneratedShort.objects.update_or_create(job=job, short_number=number, defaults=dict(
                 start_time=candidate['start'], end_time=candidate['end'], duration=duration,
-                title=title, description=((groq_metadata['description']+'\n\n') if groq_metadata else
-                    (editorial['description']+'\n\n') if editorial else '')+attribution,
-                hashtags=groq_metadata['hashtags'] if groq_metadata else editorial['hashtags'] if editorial else ['#Shorts'], transcript=text,
+                title=title, description=description, hashtags=hashtags, transcript=text,
                 caption_file=relative(srt) if srt else '', video_file=relative(output), thumbnail_file=relative(thumbnail),
                 quality_score=report['score'], quality_report=report, rights_review_status='manual_review_required'))
             short.segments.all().delete()

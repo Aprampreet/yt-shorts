@@ -516,6 +516,9 @@ class OneClickSchedulingTests(TestCase):
     @patch('api.views.publish_youtube_post.delay')
     def test_one_click_sets_slots_and_is_idempotent(self, enqueue):
         from .models import ScheduledPost
+        first_short = self.job.shorts.get(short_number=1)
+        first_short.description = 'Grounded description\n\nSource: https://example.test/original'
+        first_short.save(update_fields=['description'])
         url = f'/api/v1/jobs/{self.job.id}/schedule-batch'
         with self.captureOnCommitCallbacks(execute=True):
             first = self.client.post(url)
@@ -523,6 +526,8 @@ class OneClickSchedulingTests(TestCase):
         posts = first.json()['posts']
         self.assertEqual([p['status'] for p in posts], ['queued'] * 3)
         self.assertEqual([p['approval_basis'] for p in posts], ['source_declaration'] * 3)
+        self.assertNotIn('Source:', posts[0]['description'])
+        self.assertIn('subscribe', posts[0]['description'])
         self.assertIsNone(posts[0]['scheduled_at'])
         from datetime import datetime, timedelta
         second = datetime.fromisoformat(posts[1]['scheduled_at'])
@@ -631,18 +636,34 @@ class CaptionRequirementTests(TestCase):
 
 class GroqFormattingTests(SimpleTestCase):
     def test_metadata_hashtags_are_sanitized_and_failures_fall_back(self):
-        from .services.groq import generate_metadata
+        from .services.groq import finalize_description, generate_metadata
         response = Mock()
+        response.status_code = 200
         response.json.return_value = {'choices':[{'message':{'content':json.dumps({
-            'title':'A grounded gameplay moment', 'description':'The speaker explains the mission route.',
+            'title':'The mission route nobody expected', 'description':'The speaker explains the mission route.',
             'hashtags':['#Gaming','#Shorts','#Gaming','#ViceCity']})}}]}
         with patch.dict(os.environ, {'GROQ_API_KEY':'test-key','GROQ_ENABLED':'true'}), \
-             patch('api.services.groq.httpx.post', return_value=response):
-            result = generate_metadata('The speaker explains the mission route.', 'Gameplay')
+             patch('api.services.groq.httpx.post', return_value=response) as request:
+            result = generate_metadata('The speaker explains the mission route.')
+        self.assertIn('The speaker explains the mission route.', request.call_args.kwargs['json']['messages'][0]['content'])
+        self.assertNotIn('Source title:', request.call_args.kwargs['json']['messages'][0]['content'])
+        self.assertEqual(request.call_args.kwargs['json']['response_format']['type'], 'json_schema')
         self.assertEqual(result['hashtags'], ['#Gaming','#Shorts','#ViceCity'])
+        self.assertIn('subscribe', result['description'])
+        self.assertIn('comments', result['description'])
+        self.assertTrue(result['description'].endswith('#Gaming #Shorts #ViceCity'))
+        self.assertEqual(result['description'], finalize_description(result['description'], result['hashtags']))
+        self.assertNotIn('Source:', finalize_description('A good clip.\n\nSource: https://example.test/video', ['#Shorts']))
+        rejected = Mock(status_code=400)
+        with patch.dict(os.environ, {'GROQ_API_KEY':'test-key','GROQ_ENABLED':'true'}), \
+             patch('api.services.groq.httpx.post', side_effect=[rejected, response]) as retry:
+            self.assertIsNotNone(generate_metadata('The speaker explains the mission route.'))
+        self.assertEqual(retry.call_count, 2)
+        self.assertEqual(retry.call_args_list[0].kwargs['json']['response_format']['type'], 'json_schema')
+        self.assertEqual(retry.call_args_list[1].kwargs['json']['response_format']['type'], 'json_object')
         with patch.dict(os.environ, {'GROQ_API_KEY':'test-key','GROQ_ENABLED':'true'}), \
              patch('api.services.groq.httpx.post', side_effect=__import__('httpx').ConnectError('offline')):
-            self.assertIsNone(generate_metadata('Actual words', 'Gameplay'))
+            self.assertIsNone(generate_metadata('Actual words'))
 
     def test_word_timestamps_form_short_caption_phrases(self):
         from .services.groq import transcribe_clip
