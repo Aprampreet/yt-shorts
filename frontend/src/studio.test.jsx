@@ -8,6 +8,7 @@ import OutputCard from './components/output_card';
 import { api, initialize } from './components/api';
 vi.mock('./components/api', () => ({ api: vi.fn(), initialize: vi.fn(), asset: path => path }));
 afterEach(cleanup);
+beforeEach(() => window.history.pushState({}, '', '/'));
 beforeEach(() => { vi.clearAllMocks(); initialize.mockResolvedValue(); api.mockResolvedValue([]); });
 const short = { id:'short1', short_number:1,start_time:0,end_time:30,duration:30,title:'A real moment',description:'Source attribution',hashtags:['#Shorts'],quality_score:92,quality_report:{highlight_score:70,unverified:['Ownership']},video_url:'/video',thumbnail_url:'/thumb',download_url:'/download',caption_url:'/captions' };
 const job = { id:'job1',status:'rendering',stage:'Rendering Short 1 of 3',progress:48,results:[],analysis:{} };

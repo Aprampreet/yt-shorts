@@ -1,0 +1,121 @@
+/*
+ * JWD Creator Studio design tokens.
+ *
+ * Raw values live on :root under the --jwd-* prefix so they never collide
+ * with Tailwind's own theme namespaces. The @theme block below maps them
+ * into Tailwind 4 so new components can use utilities such as
+ * `bg-surface-1`, `text-text-2`, `border-border-1`, `text-accent`,
+ * `rounded-md`, `font-mono` and `ease-standard`.
+ *
+ * Direction: professional editing software. Near-black surfaces, quiet
+ * borders, one restrained accent. No decorative gradients or glows.
+ */
+
+:root {
+  /* Surfaces, darkest to lightest. 0 = app background. */
+  --jwd-surface-0: #0e0f10;
+  --jwd-surface-1: #141516;
+  --jwd-surface-2: #1a1c1d;
+  --jwd-surface-3: #232526;
+  --jwd-surface-hover: #242627;
+
+  /* Hairlines and dividers. */
+  --jwd-border-1: #26282a;
+  --jwd-border-2: #363839;
+
+  /* Text levels: primary, secondary, tertiary/muted, disabled. */
+  --jwd-text-1: #ececec;
+  --jwd-text-2: #a4a7a7;
+  --jwd-text-3: #73777a;
+  --jwd-text-4: #515556;
+
+  /* The single accent (pale green carried over from the Shorts studio). */
+  --jwd-accent: #c4e99f;
+  --jwd-accent-strong: #d6f5b5;
+  --jwd-accent-contrast: #182310;
+  --jwd-accent-subtle: #232824;
+  --jwd-accent-border: #354130;
+
+  /* Status colours: foreground, tinted background, border. */
+  --jwd-success: #b8db92;
+  --jwd-success-bg: #1d251a;
+  --jwd-success-border: #3f5134;
+  --jwd-warn: #bdb990;
+  --jwd-warn-bg: #24241b;
+  --jwd-warn-border: #45432d;
+  --jwd-danger: #efbdb1;
+  --jwd-danger-bg: #332321;
+  --jwd-danger-border: #68433c;
+
+  /* Focus ring. */
+  --jwd-focus: var(--jwd-accent);
+
+  /* Radius. */
+  --jwd-radius-sm: 4px;
+  --jwd-radius-md: 6px;
+  --jwd-radius-lg: 9px;
+
+  /* Spacing scale (4px base). */
+  --jwd-space-1: 4px;
+  --jwd-space-2: 8px;
+  --jwd-space-3: 12px;
+  --jwd-space-4: 16px;
+  --jwd-space-5: 24px;
+  --jwd-space-6: 32px;
+  --jwd-space-7: 48px;
+  --jwd-space-8: 64px;
+
+  /* Font stacks. */
+  --jwd-font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --jwd-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Motion. */
+  --jwd-duration-fast: 120ms;
+  --jwd-duration-base: 180ms;
+  --jwd-duration-slow: 300ms;
+  --jwd-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Shell dimensions. */
+  --jwd-sidebar-width: 232px;
+  --jwd-topbar-height: 77px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --jwd-duration-fast: 0ms;
+    --jwd-duration-base: 0ms;
+    --jwd-duration-slow: 0ms;
+  }
+}
+
+@theme inline {
+  --color-surface-0: var(--jwd-surface-0);
+  --color-surface-1: var(--jwd-surface-1);
+  --color-surface-2: var(--jwd-surface-2);
+  --color-surface-3: var(--jwd-surface-3);
+  --color-border-1: var(--jwd-border-1);
+  --color-border-2: var(--jwd-border-2);
+  --color-text-1: var(--jwd-text-1);
+  --color-text-2: var(--jwd-text-2);
+  --color-text-3: var(--jwd-text-3);
+  --color-text-4: var(--jwd-text-4);
+  --color-accent: var(--jwd-accent);
+  --color-accent-strong: var(--jwd-accent-strong);
+  --color-accent-contrast: var(--jwd-accent-contrast);
+  --color-accent-subtle: var(--jwd-accent-subtle);
+  --color-success: var(--jwd-success);
+  --color-success-bg: var(--jwd-success-bg);
+  --color-warn: var(--jwd-warn);
+  --color-warn-bg: var(--jwd-warn-bg);
+  --color-danger: var(--jwd-danger);
+  --color-danger-bg: var(--jwd-danger-bg);
+
+  --radius-sm: var(--jwd-radius-sm);
+  --radius-md: var(--jwd-radius-md);
+  --radius-lg: var(--jwd-radius-lg);
+
+  --font-sans: var(--jwd-font-sans);
+  --font-mono: var(--jwd-font-mono);
+
+  --ease-standard: var(--jwd-ease-standard);
+}

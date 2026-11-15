@@ -33,6 +33,25 @@ cd backend
 ../.venv/bin/celery -A backend worker --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
 ```
 
+That single worker consumes the default `celery` queue, which is where every task goes while `CELERY_SEPARATE_QUEUES` is unset or `false` (the default). To keep long renders from blocking AI and publishing tasks, set `CELERY_SEPARATE_QUEUES=true` in `.env` and run two workers instead. Don't enable the flag without them: routed tasks wait in queues that no worker reads.
+
+```sh
+cd backend
+# FFmpeg renders: generate_job, rerender_short, story render
+../.venv/bin/celery -A backend worker -Q media -n media@%h --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
+# AI calls, YouTube/Instagram publishing and anything still on the default queue
+../.venv/bin/celery -A backend worker -Q ai,publish,celery -n ai@%h --concurrency=2 --prefetch-multiplier=1 --loglevel=INFO
+```
+
+Periodic tasks (the YouTube publication status poll, later scheduled Instagram publishing) need exactly one Celery Beat process:
+
+```sh
+cd backend
+../.venv/bin/celery -A backend beat --loglevel=INFO
+```
+
+SQLite runs in WAL mode (`SQLITE_JOURNAL_MODE=wal`) so the API can read while workers write. Use `SQLITE_JOURNAL_MODE=delete` on network filesystems, or PostgreSQL for heavier use.
+
 ```sh
 npm --prefix frontend run dev
 ```
@@ -56,7 +75,7 @@ On macOS, the minimal Homebrew FFmpeg build may omit libass. `brew install ffmpe
 
 ## Hosted AI setup and current availability
 
-Hosted inference is **off by default**. Set `AI_ALLOW_BILLABLE=true` only after you explicitly approve possible charges, then set `HF_TOKEN` to a fine-grained token with Inference Providers permission. A token alone never enables calls. Set `HF_TRANSCRIPTION_MODEL`, `HF_TRANSLATION_MODEL`, `HF_TEXT_MODEL` and optionally `HF_PROVIDER` to models/providers that currently support the task. These values have no hardcoded defaults: catalog availability, region, model license and account credits vary.
+Hosted inference is **off by default**. `AI_ALLOW_PAID_PROVIDERS=false` (legacy name `AI_ALLOW_BILLABLE`, still honoured; either set to `true` enables paid/metered providers), `AI_ALLOW_FREE_TIER=true` (free-tier providers allowed) and `AI_DAILY_BUDGET_USD=0` (no spend on priced calls) are the defaults. Set `AI_ALLOW_BILLABLE=true` only after you explicitly approve possible charges, then set `HF_TOKEN` to a fine-grained token with Inference Providers permission. A token alone never enables calls. Set `HF_TRANSCRIPTION_MODEL`, `HF_TRANSLATION_MODEL`, `HF_TEXT_MODEL` and optionally `HF_PROVIDER` to models/providers that currently support the task. These values have no hardcoded defaults: catalog availability, region, model license and account credits vary.
 
 Checked against official documentation on **14 November 2026**:
 
@@ -167,7 +186,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open `http://localhost:8080`. Redis isn't exposed; API isn't exposed directly; media is accessible only through ownership-checked API endpoints. Worker concurrency is one and its container is limited to two CPUs/2 GB RAM. The non-root API and worker share a private named volume, and a separate migration service runs first. Docker configuration is supplied but was **not run here** because the Docker CLI is unavailable.
+Open `http://localhost:8080`. Redis isn't exposed; API isn't exposed directly; media is accessible only through ownership-checked API endpoints. Compose sets `CELERY_SEPARATE_QUEUES=true` (unless you set it yourself) and starts a `worker` on the `media` queue (concurrency one) and a `worker-ai` on `ai,publish,celery` (concurrency two), each limited to two CPUs/2 GB RAM, plus a `beat` service for periodic tasks. With the flag set to `false`, every task goes to `worker-ai`. The non-root API and worker share a private named volume, and a separate migration service runs first. Docker configuration is supplied but was **not run here** because the Docker CLI is unavailable.
 
 For an Internet deployment, put this studio behind authenticated HTTPS access, set `DJANGO_DEBUG=false`, unique secret, exact hosts/origins and secure proxy settings. The included stack binds to loopback deliberately; anonymous browser sessions are not a full multi-user account system. Add durable account authentication and distributed admission/rate limits before public multi-tenant access. Use a restricted worker/egress policy, disk limits at the volume level, backups, monitored Redis and error monitoring. Do not expose Redis, `/data`, Django admin or media storage publicly. Review nginx upload/time limits to match backend limits.
 

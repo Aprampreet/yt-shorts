@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from django.core.exceptions import ImproperlyConfigured
 import dj_database_url
@@ -46,6 +47,11 @@ DATABASES = {'default': dj_database_url.config(default=f'sqlite:///{LOCAL_STATE 
 DATABASES['default'].setdefault('OPTIONS', {})
 if DATABASES['default']['ENGINE'].endswith('sqlite3'):
     DATABASES['default']['OPTIONS']['timeout'] = 30
+    # WAL lets the API read while a worker writes (two workers in compose). Persistent per database file;
+    # in-memory test databases ignore it. Set SQLITE_JOURNAL_MODE=delete to opt out (e.g. network filesystems).
+    _journal_mode = os.getenv('SQLITE_JOURNAL_MODE', 'wal').strip().lower()
+    if _journal_mode in {'wal', 'delete', 'truncate', 'persist'}:
+        DATABASES['default']['OPTIONS'].setdefault('init_command', f'PRAGMA journal_mode={_journal_mode};')
 CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174').split(',')
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
@@ -82,8 +88,43 @@ CELERY_TASK_SOFT_TIME_LIMIT = JOB_TIMEOUT - 15
 CELERY_BROKER_CONNECTION_TIMEOUT = 3
 CELERY_TASK_PUBLISH_RETRY = False
 CELERY_BEAT_SCHEDULE = {'refresh-youtube-publications': {'task':'api.tasks.refresh_youtube_publications','schedule':300.0}}
+# Task modules outside api/tasks.py (autodiscover only imports api.tasks). Each is imported only once its file
+# exists, so the worker starts cleanly before the packages that add them have landed.
+_EXTRA_TASK_MODULES = ['api.pipeline.story_tasks', 'api.publishing.tasks']
+CELERY_IMPORTS = [m for m in _EXTRA_TASK_MODULES
+                  if (BASE_DIR / (m.replace('.', '/') + '.py')).is_file()
+                  or (BASE_DIR / m.replace('.', '/') / '__init__.py').is_file()]
+# Opt-in queue split. Off by default: routing tasks to named queues would strand them on a worker started
+# without -Q (which only consumes the default 'celery' queue). Turn on only when workers consume
+# media and ai,publish,celery (see compose.yaml / README).
+CELERY_SEPARATE_QUEUES = os.getenv('CELERY_SEPARATE_QUEUES', 'false').lower() == 'true'
+CELERY_QUEUE_ROUTES = {
+    'api.tasks.generate_job': {'queue': 'media'},
+    'api.tasks.rerender_short': {'queue': 'media'},
+    'api.story.render': {'queue': 'media'},
+    'api.story.*': {'queue': 'ai'},
+    'api.tasks.publish_youtube_post': {'queue': 'publish'},
+    'api.tasks.refresh_youtube_publications': {'queue': 'publish'},
+    'api.publishing.*': {'queue': 'publish'},
+}
+CELERY_TASK_ROUTES = CELERY_QUEUE_ROUTES if CELERY_SEPARATE_QUEUES else {}
+# Soft limit for story AI tasks (analyze/write/narrate); applied by those task decorators.
+AI_TASK_SOFT_TIME_LIMIT = int(os.getenv('AI_TASK_SOFT_TIME_LIMIT', 600))
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
+
+# Provider spending policy (enforced by the provider layer). Hosted paid/metered inference stays off unless
+# AI_ALLOW_PAID_PROVIDERS=true; the legacy AI_ALLOW_BILLABLE=true still enables it. Code that must honour
+# runtime env changes (tests patch os.environ) should re-read both variables instead of caching this value.
+AI_ALLOW_PAID_PROVIDERS = any(os.getenv(name, 'false').strip().lower() == 'true'
+                              for name in ('AI_ALLOW_PAID_PROVIDERS', 'AI_ALLOW_BILLABLE'))
+AI_ALLOW_FREE_TIER = os.getenv('AI_ALLOW_FREE_TIER', 'true').strip().lower() == 'true'
+try:
+    AI_DAILY_BUDGET_USD = Decimal(os.getenv('AI_DAILY_BUDGET_USD', '0') or '0')
+except InvalidOperation:
+    raise ImproperlyConfigured('AI_DAILY_BUDGET_USD must be a decimal number of US dollars, e.g. 0 or 2.50.')
+if not AI_DAILY_BUDGET_USD.is_finite() or AI_DAILY_BUDGET_USD < 0:
+    raise ImproperlyConfigured('AI_DAILY_BUDGET_USD must be a finite, non-negative amount.')
 LOGGING = {'version': 1, 'disable_existing_loggers': False,
            'handlers': {'console': {'class': 'logging.StreamHandler'}},
            'root': {'handlers': ['console'], 'level': 'INFO'}}

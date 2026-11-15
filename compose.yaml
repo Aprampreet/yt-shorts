@@ -16,6 +16,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: sqlite:////data/db.sqlite3
       MEDIA_ROOT: /data/media
+      # The two workers below consume separate queues. Set CELERY_SEPARATE_QUEUES=false in .env/shell to
+      # route everything to the default 'celery' queue instead (then only worker-ai consumes tasks).
+      CELERY_SEPARATE_QUEUES: ${CELERY_SEPARATE_QUEUES:-true}
     volumes: [studio-data:/data]
     command: python manage.py migrate --noinput
   api:
@@ -27,14 +30,40 @@ services:
       redis: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
     restart: unless-stopped
+  # Heavy FFmpeg work (generate_job, rerender_short, story render): one task at a time.
   worker:
     build: ./backend
     env_file: .env
     environment: *backend-env
     volumes: [studio-data:/data]
-    command: celery -A backend worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1
+    command: celery -A backend worker -Q media -n media@%h --loglevel=INFO --concurrency=1 --prefetch-multiplier=1
     cpus: 2
     mem_limit: 2g
+    depends_on:
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  # Network-bound AI calls and publishing, plus the default queue so nothing is stranded when
+  # CELERY_SEPARATE_QUEUES is off (in that case this worker also runs renders, two at a time).
+  worker-ai:
+    build: ./backend
+    env_file: .env
+    environment: *backend-env
+    volumes: [studio-data:/data]
+    command: celery -A backend worker -Q ai,publish,celery -n ai@%h --loglevel=INFO --concurrency=2 --prefetch-multiplier=1
+    cpus: 2
+    mem_limit: 2g
+    depends_on:
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  # Periodic tasks (YouTube publication status poll; scheduled publishing added later). Run exactly one.
+  beat:
+    build: ./backend
+    env_file: .env
+    environment: *backend-env
+    volumes: [studio-data:/data]
+    command: celery -A backend beat --loglevel=INFO --schedule /data/celerybeat-schedule
     depends_on:
       redis: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
