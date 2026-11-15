@@ -25,7 +25,9 @@ VISUAL_KINDS = ('video', 'image', 'graphic')
 FORMAT_LABELS = {'gaming_news': 'Gaming news', 'gameplay_analysis': 'Gameplay analysis', 'hidden_details': 'Hidden details',
                  'game_comparison': 'Comparison', 'explainer': 'Explainer', 'gaming_commentary': 'Commentary',
                  'myth_vs_fact': 'Myth vs fact', 'top_discoveries': 'Top discoveries'}
-SOURCE_LABELS = {'source_claim': 'Source: the video', 'inferred': 'Analysis, unconfirmed', 'verified': 'Verified by creator'}
+# graphics.FactCard renders this as "Source: <label>".
+SOURCE_LABELS = {'source_claim': 'the video (as stated there)', 'inferred': 'our analysis, unconfirmed',
+                 'verified': 'the video, checked by the creator'}
 
 
 def truncate(text, limit):
@@ -114,7 +116,7 @@ def _card(name, text, claim, script, fmt, core_labels, index):
     rest = ' '.join(sents[1:]) or first
     spec = {'kind': 'fact_card', 'headline': truncate(first, 90), 'body': truncate(rest, 240)}
     if claim:
-        spec['source_label'] = SOURCE_LABELS.get(claim.get('status'), 'Source: the video')
+        spec['source_label'] = SOURCE_LABELS.get(claim.get('status'), 'the video (as stated there)')
     return 'fact_card', spec
 
 

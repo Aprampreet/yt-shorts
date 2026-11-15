@@ -269,8 +269,8 @@ def grounding(sections, claims, source_text, language):
 
 
 def score_script(sections, *, language, target_duration, claims=None, source_text='', quotes=()):
-    """Full quality report for one script. ``passed`` needs the 0.70 threshold and both hard gates (structure
-    complete, originality limits)."""
+    """Full quality report for one script. ``passed`` needs the 0.70 threshold and the hard gates (structure
+    complete, originality limits, length within ~half of the window)."""
     sections = dict(sections or {})
     text = full_text(sections)
     word_count = len(text.split())
@@ -339,7 +339,7 @@ def score_script(sections, *, language, target_duration, claims=None, source_tex
     components = {'structure': round(structure, 3), 'length_fit': round(length_fit, 3), 'grounding': round(ground, 3),
                   'originality': round(originality_score, 3), 'hook': round(hook, 3), 'readability': round(readability, 3)}
     score = round(sum(WEIGHTS[k] * v for k, v in components.items()), 3)
-    gates = {'structure_complete': structure_ok, 'originality': orig['passed']}
+    gates = {'structure_complete': structure_ok, 'originality': orig['passed'], 'length': length_fit >= 0.5}
     passed = score >= THRESHOLD and all(gates.values())
     return {'score': score, 'threshold': THRESHOLD, 'passed': passed, 'gates': gates, 'components': components,
             'explanations': explain, 'reasons': reasons, 'word_count': word_count, 'estimated_duration': estimated,

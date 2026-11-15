@@ -19,8 +19,9 @@ from . import card_specs, graphics
 from .ffmpeg_graph import ffmpeg_capabilities
 from .timeline import Timeline
 
-BACKGROUND = {'gaming_hype': '#101114', 'cinematic_gaming': '#0c0b0a', 'viral_commentary': '#120d10',
-              'minimal_premium': '#141416', 'split_screen_gaming': '#0b1210'}
+# Dark but above blackdetect's threshold, so graphics scenes are not reported as black frames.
+BACKGROUND = {'gaming_hype': '#2b2d38', 'cinematic_gaming': '#302c27', 'viral_commentary': '#352a31',
+              'minimal_premium': '#2e2e33', 'split_screen_gaming': '#26332f'}
 CARD_MODELS = {'fact_card': card_specs.FactCard, 'comparison_card': card_specs.ComparisonCard,
                'callout': card_specs.Callout, 'numbered_list': card_specs.NumberedList,
                'title_card': card_specs.TitleCard}
@@ -144,7 +145,7 @@ def compile_script(script, scenes, workdir, *, canvas=(720, 1280), fps=30, theme
     renderer = 'ass' if devanagari and not raqm else 'png'
 
     rows = _tile(scenes, D)
-    background = BACKGROUND.get(theme, '#101114')
+    background = BACKGROUND.get(theme, '#2b2d38')
     clips, overlays, provenance = [], [], {}
 
     def record(asset, used_as, order):
@@ -226,6 +227,14 @@ def compile_script(script, scenes, workdir, *, canvas=(720, 1280), fps=30, theme
                              'animation': 'none', 'z': 20, 'license_status': 'generated'})
     elif renderer == 'ass':
         warnings.append('Captions burned with libass because Pillow raqm shaping is unavailable.')
+    # Keep cards clear of the caption band: lift any card whose bottom would run into the highest caption.
+    caption_tops = [o['rect']['y'] for o in overlays if o['kind'] == 'caption']
+    band_top = min(caption_tops) if caption_tops else (bottom - round(H * 0.12) if renderer == 'ass' else None)
+    if band_top is not None:
+        gap = round(H * 0.015)
+        for o in overlays:
+            if o['kind'] != 'caption' and o['rect']['y'] + o['rect']['h'] > band_top - gap:
+                o['rect']['y'] = max(top, band_top - gap - o['rect']['h'])
     audio = [{'id': 'narration', 'media': _media(narration, has_audio=True), 'src_in': 0,
               'src_out': min(D, float(narration.duration)), 'start': 0, 'role': 'narration', 'fade_in': 0.015,
               'fade_out': 0.05}]
