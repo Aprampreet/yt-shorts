@@ -199,13 +199,22 @@ class GroqProvider(ProviderBase):
 
     def metadata(self, transcript):
         """Policy-gated, ledger-counted ``services.groq.generate_metadata``; None when blocked or failing.
-        The wrapped helper hides HTTP status, so a failure is recorded as 'error' without starting a cooldown."""
+        The helper still returns None on any failure, but an observer hook lets us see the HTTP status so a 429
+        starts the provider cooldown through the ledger like every other Groq call."""
         if not transcript.strip() or self.unavailable_reason(Capability.TEXT):
             return None
+        seen = []
         try:
             with ledger.guarded(self, Capability.TEXT, model=self.model_for(Capability.TEXT)) as rec:
-                result = groq_service.generate_metadata(transcript)
-                if result is None:
+                result = groq_service.generate_metadata(transcript, on_response=seen.append)
+                status = next((r.status_code for r in reversed(seen) if isinstance(getattr(r, 'status_code', None), int)), None)
+                if status is not None:
+                    rec.http_status = status
+                if status == 429:
+                    headers = getattr(seen[-1], 'headers', None)
+                    rec.status = 'rate_limited'
+                    rec.retry_after_until = ledger.parse_retry_after(headers) or ledger.default_cooldown()
+                elif result is None:
                     rec.status = 'error'
                 return result
         except ProviderError as exc:

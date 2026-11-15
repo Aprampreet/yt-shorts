@@ -90,7 +90,9 @@ CELERY_TASK_PUBLISH_RETRY = False
 CELERY_BEAT_SCHEDULE = {'refresh-youtube-publications': {'task':'api.tasks.refresh_youtube_publications','schedule':300.0},
                         # Instagram has no native scheduling: this publishes approved posts once scheduled_at has passed.
                         'publish-due-instagram-posts': {'task':'api.publishing.publish_due_instagram_posts','schedule':60.0},
-                        'refresh-instagram-tokens': {'task':'api.publishing.refresh_instagram_tokens','schedule':86400.0}}
+                        'refresh-instagram-tokens': {'task':'api.publishing.refresh_instagram_tokens','schedule':86400.0},
+                        # Retention without cron: runs the cleanup_studio management command once a day.
+                        'cleanup-studio': {'task':'api.tasks.cleanup_studio_task','schedule':86400.0}}
 # Task modules outside api/tasks.py (autodiscover only imports api.tasks). Each is imported only once its file
 # exists, so the worker starts cleanly before the packages that add them have landed.
 _EXTRA_TASK_MODULES = ['api.pipeline.story_tasks', 'api.publishing.tasks']

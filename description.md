@@ -1,3 +1,5 @@
+> **Note:** this file describes the original prototype specification. It is kept for history and no longer describes the current product; see README.md.
+
 # YouTube Shorts Generator
 
 ## 1. Project overview

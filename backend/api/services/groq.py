@@ -51,8 +51,11 @@ def finalize_description(description, hashtags):
     return (body + '\n\n' + tags).strip()[:5000]
 
 
-def generate_metadata(transcript):
-    """Return None on provider failure; never make rendering depend on Groq."""
+def generate_metadata(transcript, on_response=None):
+    """Return None on provider failure; never make rendering depend on Groq.
+
+    ``on_response`` is an optional observer called with each raw HTTP response (success or error) so a caller such
+    as the provider adapter can see the status code (e.g. 429) that this helper otherwise swallows."""
     if not enabled() or not transcript.strip():
         return None
     prompt = ('You are an expert YouTube Shorts editor. Create irresistible but truthful metadata from the video script below. '
@@ -76,6 +79,11 @@ def generate_metadata(transcript):
                 json={'model': model, 'messages': [{'role': 'user', 'content': prompt}],
                       'temperature': 0.7, 'max_completion_tokens': 700,
                       'response_format': response_format})
+            if on_response is not None:
+                try:
+                    on_response(response)
+                except Exception:   # an observer must never change the outcome
+                    log.debug('Groq response observer failed', exc_info=True)
             if response.status_code == 400 and attempt == 0:
                 response_format = {'type': 'json_object'}
                 continue

@@ -211,3 +211,9 @@ def media_permalink(token, media_id):
 
 def public_media_ready():
     return bool(public_base_url())
+
+
+def publishing_available():
+    """Studio-level readiness (no account check): app configured and a public media URL set.
+    GET /v1/social/platforms adds the per-user 'connected' condition for can_publish."""
+    return is_configured() and public_media_ready()

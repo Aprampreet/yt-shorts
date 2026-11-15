@@ -1,155 +1,252 @@
-# Framecut — authorized-footage Shorts Studio
+# JWD Creator Studio 2.0
 
-An incremental upgrade of the original Django Ninja / React repository. Submit an authorized YouTube URL or upload your original footage, receive a persistent job immediately, and let a bounded Celery worker produce up to three distinct 9:16 MP4s. The studio shows actual worker progress, private previews, editing/QA reports, caption downloads, recent history and a batch ZIP.
+A local-first studio for making vertical (9:16) videos from footage you are entitled to use. It is a Django Ninja API with Celery workers, and a React front end. It upgrades the earlier "Framecut" Shorts generator.
 
-## Start locally (MacBook Air / modest CPU)
+The studio has four tabs:
 
-Requires Python 3.13, Node 22+, Redis, FFmpeg with libx264/libass, and `whisper-cli` for offline speech captions. The worker uses Node with the pinned `yt-dlp-ejs` package for public YouTube extraction. Local transcription uses a multilingual Whisper model on CPU; PyTorch, TensorFlow and GPU inference are not required.
+| Tab | What it does |
+| --- | --- |
+| **Shorts Generator** | Takes an authorised YouTube URL or an uploaded video and renders up to three highlight Shorts, with captions, reframing and a QA report. |
+| **AI Story Studio** | Turns a source transcript (or a YouTube URL, or your own text) into original scripts, narration, a storyboard and a rendered video made of your assets and generated graphics. |
+| **Publishing Studio** | Drafts, schedules and uploads finished videos to YouTube and (with extra setup) Instagram Reels, after a rights review. |
+| **Media Library** | Your uploaded and generated assets, each with an explicit licence state that controls how it can be used and published. |
+
+Nothing here guarantees views, income or copyright clearance. The studio records what you tell it and flags what it cannot check. See [Rights and originality](#rights-and-originality) and [Known limitations](#known-limitations-and-unverified-items).
+
+## Contents
+
+1. [Quick start (macOS)](#quick-start-macos)
+2. [System prerequisites](#system-prerequisites)
+3. [AI providers](#ai-providers)
+4. [Shorts Generator](#shorts-generator)
+5. [AI Story Studio](#ai-story-studio)
+6. [Media Library](#media-library)
+7. [Publishing Studio](#publishing-studio)
+8. [Rights and originality](#rights-and-originality)
+9. [API overview](#api-overview)
+10. [Testing](#testing)
+11. [Retention and cleanup](#retention-and-cleanup)
+12. [Docker Compose](#docker-compose)
+13. [Known limitations and unverified items](#known-limitations-and-unverified-items)
+
+## Quick start (macOS)
+
+Requires Python 3.13, Node 22 or newer, Redis and FFmpeg (see [System prerequisites](#system-prerequisites)).
 
 ```sh
-python3 -m venv .venv
+python3.13 -m venv .venv
 .venv/bin/pip install -r backend/requirements.lock
 npm --prefix frontend ci
-cp .env.example .env
-```
-
-Install `whisper-cli` (on macOS, `brew install whisper-cpp`), then place the multilingual model at `backend/.local/models/ggml-base-q5_1.bin`. For example, download it from the [whisper.cpp model repository](https://huggingface.co/ggerganov/whisper.cpp) and verify SHA-1 `a3733eda680ef76256db5fc5dd9de8629e62c5e7`. This local file is ignored by Git. Set `LOCAL_WHISPER_BIN` and `LOCAL_WHISPER_MODEL` if using different paths.
-
-Edit `.env`. Django and Celery automatically load it from the project root; nonempty values already set in the terminal take precedence. Use `DJANGO_DEBUG=true` only for local development. A production secret is mandatory with debug disabled. Run migrations once:
-
-```sh
+cp .env.example .env          # then edit; secrets stay in .env, which is not committed
 .venv/bin/python backend/manage.py migrate
 ```
 
-Run these in separate terminals:
+Django and Celery load `.env` from the project root. Non-empty values already set in the terminal take precedence. Use `DJANGO_DEBUG=true` only on a local machine; with debug off a real `DJANGO_SECRET_KEY` is required.
+
+Run each of these in its own terminal:
 
 ```sh
+# 1. Redis
 redis-server --bind 127.0.0.1
+
+# 2. API
 .venv/bin/python backend/manage.py runserver 127.0.0.1:8000
-```
 
-```sh
-cd backend
-../.venv/bin/celery -A backend worker --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
-```
+# 3. Worker (default setup: one worker, default queue)
+cd backend && ../.venv/bin/celery -A backend worker --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
 
-That single worker consumes the default `celery` queue, which is where every task goes while `CELERY_SEPARATE_QUEUES` is unset or `false` (the default). To keep long renders from blocking AI and publishing tasks, set `CELERY_SEPARATE_QUEUES=true` in `.env` and run two workers instead. Don't enable the flag without them: routed tasks wait in queues that no worker reads.
+# 4. Beat (exactly one process; scheduled publishing, status polling, token refresh, daily cleanup)
+cd backend && ../.venv/bin/celery -A backend beat --loglevel=INFO
 
-```sh
-cd backend
-# FFmpeg renders: generate_job, rerender_short, story render
-../.venv/bin/celery -A backend worker -Q media -n media@%h --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
-# AI calls, YouTube/Instagram publishing and anything still on the default queue
-../.venv/bin/celery -A backend worker -Q ai,publish,celery -n ai@%h --concurrency=2 --prefetch-multiplier=1 --loglevel=INFO
-```
-
-Periodic tasks (the YouTube publication status poll, later scheduled Instagram publishing) need exactly one Celery Beat process:
-
-```sh
-cd backend
-../.venv/bin/celery -A backend beat --loglevel=INFO
-```
-
-SQLite runs in WAL mode (`SQLITE_JOURNAL_MODE=wal`) so the API can read while workers write. Use `SQLITE_JOURNAL_MODE=delete` on network filesystems, or PostgreSQL for heavier use.
-
-```sh
+# 5. Front end
 npm --prefix frontend run dev
 ```
 
-Open the URL Vite prints, normally `http://localhost:5173`. Ports 5173 and 5174 with either `localhost` or `127.0.0.1` are trusted by the sample local configuration. Vite proxies `/api` to Django, so cookies and private previews work on the same origin. Use the same hostname consistently. If choosing a different port, add its origin to `CORS_ALLOWED_ORIGINS` and restart Django. Do not override this variable with only one port when another frontend port is in use. For a separate frontend origin, set `VITE_API_BASE=http://localhost:8000/api` and configure CORS accordingly.
+Open the URL Vite prints (normally `http://localhost:5173`). Vite proxies `/api` to Django so cookies work on one origin. Use the same host name (`localhost` or `127.0.0.1`) throughout. For another port, add its origin to `CORS_ALLOWED_ORIGINS` and restart Django.
 
-On macOS, the minimal Homebrew FFmpeg build may omit libass. `brew install ffmpeg-full` supplies it; Apple Silicon's `/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg` is auto-detected. Alternatively set `FFMPEG_BIN` and `FFPROBE_BIN`. The Docker backend includes FFmpeg/libass, licensed DejaVu fonts, `whisper-cli`, and the verified multilingual model. Homebrew's full FFmpeg build installs additional libraries; this application does not invoke its local inference filters.
+### Opt-in queue split
 
-## What works
+By default every task uses the `celery` queue and one worker is enough. A long render then blocks AI and publishing tasks. To avoid that, set `CELERY_SEPARATE_QUEUES=true` in `.env` and run two workers instead of the one above:
 
-- UUID source/job/short models and migrations; Celery + Redis; immediate `202` responses, durable progress, atomic job claim, failure codes, cancellation between operations, retries and whole-job regeneration.
-- Strict public HTTPS YouTube video/Shorts URL validation, no playlists or arbitrary media URLs; yt-dlp download with safe names and permission declaration. YouTube captions are not requested. Authentication/DRM bypass is not implemented. Upload is the fallback when a permitted download is unavailable.
-- ffprobe actual FPS/duration/streams; file/duration/resolution bounds; bounded scene-change sampling, silence analysis and transparent candidate scores. Interval scheduling selects up to three non-overlapping moments and penalizes substantially repeated dialogue. Low semantic confidence is disclosed.
-- Hosted Hugging Face speech recognition and structured transcript/editorial analysis when explicitly configured. Hosted editorial signals influence ranking of the top six heuristic candidates. Pydantic validates model responses. Remote errors fall back with visible warnings; no synthetic transcripts or fabricated AI results.
-- Source audio is extracted to mono 16 kHz PCM and transcribed locally with `whisper-cli` before highlight selection. Configured hosted ASR is an optional fallback. Four distinct ASS caption styles, JSON/SRT/ASS subtitle artifacts and transcript editing with background re-rendering, high-contrast safe margins and restrained phrase animation. Whisper segment timestamps are retained; subdivisions within phrases use **approximate interpolation**, not claimed word-level alignment.
-- Real CPU FFmpeg H.264/AAC, 720×1280 by default, optional 1080×1920 when source height supports it; source-compatible frame-rate conversion; full-frame blurred-background layout or explicit center crop, gentle color adjustment, fades, loudness normalization and peak limiting. Full-frame layout preserves HUD/context instead of guessing a subject.
-- Real thumbnails and playback; individual MP4/SRT/ASS downloads, metadata copy/regeneration, full-job regeneration, ZIP and session-scoped history.
-- QA probes dimensions, duration and audio; full decode checks corruption; black/freeze detection and peak measurements flag review items. Technical repair gets one bounded repeat. Editorial/caption accuracy, final-word completeness and perceptual A/V sync are explicitly **unverified**. The score is a technical heuristic, never an audience/virality claim.
-- Rights declarations and optional references stored with source attribution. All finished jobs use `needs_review`, and Shorts require manual rights review. A declaration or reference is not verified ownership; captions/crops do not establish monetization eligibility.
-- Session-scoped private assets with CSRF on cookie-authenticated mutations; no public media-directory route; URL/path traversal checks; hourly per-session and global queue caps; bounded subprocesses, disk checks and retention cleanup.
-
-## Hosted AI setup and current availability
-
-Hosted inference is **off by default**. `AI_ALLOW_PAID_PROVIDERS=false` (legacy name `AI_ALLOW_BILLABLE`, still honoured; either set to `true` enables paid/metered providers), `AI_ALLOW_FREE_TIER=true` (free-tier providers allowed) and `AI_DAILY_BUDGET_USD=0` (no spend on priced calls) are the defaults. Set `AI_ALLOW_BILLABLE=true` only after you explicitly approve possible charges, then set `HF_TOKEN` to a fine-grained token with Inference Providers permission. A token alone never enables calls. Set `HF_TRANSCRIPTION_MODEL`, `HF_TRANSLATION_MODEL`, `HF_TEXT_MODEL` and optionally `HF_PROVIDER` to models/providers that currently support the task. These values have no hardcoded defaults: catalog availability, region, model license and account credits vary.
-
-Checked against official documentation on **14 November 2026**:
-
-- The [SDK task/provider matrix](https://huggingface.co/docs/huggingface_hub/guides/inference) distinguishes ASR from chat completion; their request formats and provider coverage differ. The application uses `InferenceClient.automatic_speech_recognition` and `InferenceClient.chat_completion`, never invented endpoint URLs.
-- The [ASR task page](https://huggingface.co/docs/inference-providers/tasks/automatic-speech-recognition) lists `openai/whisper-large-v3` as a recommended hosted model and documents `hf models ls --warm --pipeline-tag automatic-speech-recognition --sort trending_score` for discovery. This is a **remote** option, not a local model download or a guarantee that your account can route it.
-- The [chat completion task page](https://huggingface.co/docs/inference-providers/tasks/chat-completion) lists instruction models such as `google/gemma-2-2b-it` and `openai/gpt-oss-120b`. Check live provider mappings and JSON support before configuring one. Models aren't interchangeable across tasks.
-- [Current pricing](https://huggingface.co/docs/inference-providers/pricing) states free accounts have **no included monthly inference credits**; purchased credits or a subscription may be required. No unlimited free inference is assumed, and no paid account is provisioned by this project.
-
-Without hosted inference, local Whisper supplies speech text. `require_captions` defaults to true: if no usable speech transcript is generated, the job fails clearly instead of presenting an uncaptained result. Disable this option only for footage known to be speech-free. A source with enough duration can yield three clips, but semantic coherence cannot be certified by heuristics.
-
-`HIGHLIGHT_WEIGHTS` accepts a JSON object with all eight scoring signals; values are normalized and invalid weights are rejected.
-
-`AI_REQUEST_TIMEOUT`, `AI_MAX_RETRIES` and `AI_MAX_CALLS_PER_JOB` bound requests. One worker makes remote calls sequentially. Logs record request attempts, timings and status without tokens. 400/401/402/403/404/422 are not retried; transient failures get exponential backoff. Malformed editorial JSON gets one additional structured-response attempt. Job reports contain inference calls, per-stage time, total time and measured job-directory bytes (not a sampled peak). A provider/account-side spending cap remains necessary: this release does not infer dollar cost or implement a cross-worker daily currency budget. Metadata regeneration uses the same adapter but is a synchronous explicitly requested action.
-
-Hosted provider failure paths and schemas are tested with mocks. Local Whisper was exercised on a short spoken test recording; automated media tests use generated footage. A public YouTube source was downloaded during local verification, but its contents and caption accuracy still require user review.
-
-## Bilingual captions and social queue
-
-Automatically generated captions are marked for human accuracy review. Each timed transcript segment stores spoken text, an English translation, a Hindi translation, a language label, timestamps and available confidence. A lightweight script/word detector marks likely language changes, including Romanized Hindi, but it is not verified language detection and must be reviewed. Hosted translation is available only through a configured and explicitly enabled provider. Missing translations are omitted with a job warning; they are never fabricated. Devanagari ASS rendering requires licensed font coverage (Noto Sans Devanagari in Docker, Arial Unicode MS on this Mac). The transcript editor persists corrections and queues an FFmpeg re-render from retained source footage.
-
-Original Analysis is an optional text commentary overlay. It requires a configured and approved text provider plus source transcript; generated commentary is validated against an exact source quote. It is text-based; licensed voice narration is still open. Its presence does not establish copyright permission or monetization eligibility.
-
-The Schedule screen supports drafts, editable metadata, timezone/slots, suggested times, calendar, queue, failures, and connected YouTube accounts. YouTube connection uses the [official OAuth web server flow](https://developers.google.com/identity/protocols/oauth2/web-server) with offline refresh; credentials and resumable upload session URIs are Fernet-encrypted. Set `SOCIAL_ENCRYPTION_KEY` to a stable Fernet key and configure a Google OAuth application with `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET` and an exact `YOUTUBE_REDIRECT_URI`. Keep the key private and backed up; losing it makes existing accounts unrecoverable. The callback host and browser host must match for the anonymous session cookie. Account disconnection erases stored credentials locally; revoke access in Google separately if desired.
-
-For the one-click flow, connect one YouTube channel and generate Shorts from a source whose rights declaration you have made. The results page has **Schedule Shorts on YouTube**. One click queues Short 1 immediately, Short 2 for five hours later, and Short 3 for ten hours later. YouTube receives future videos as private uploads with native `publishAt` times. A second click reuses the same queue records; already uploaded Shorts are not uploaded again. The queue records `source_declaration` as the approval basis. This records the user's declaration, not an independent rights or music check. The older manual draft and review workflow remains available through the API.
-
-Optional Groq integration uses `GROQ_API_KEY` from the ignored local `.env`. It transcribes each selected clip with Whisper timestamps for better burned-in captions. For metadata, it receives the selected Short's script and writes a specific YouTube title, short description, and three to five relevant hashtags. The studio adds a like/subscribe/comment line and visible hashtags to the description. Source URLs and source credits stay in the internal rights report and are not appended to the public description. Local captions and existing metadata remain the fallback if Groq is unavailable or rate limited. Existing Shorts get Groq metadata when the one-click scheduling action is used. Groq account limits and pricing can change; check your account before enabling it. After changing `.env`, restart the Celery worker and Django server.
-
-### Connect a YouTube channel locally
-
-1. In [Google Cloud](https://console.cloud.google.com/), create/select a project and enable **YouTube Data API v3**. In Google Auth Platform, configure Branding and an **External** Audience for a personal Google account. While the app is in Testing, add your Google account as a test user. In Data Access add `youtube.upload` and `youtube.readonly`.
-2. In Google Auth Platform → Clients, create an OAuth client of type **Web application**. Add this exact **Authorized redirect URI**: `http://localhost:8000/api/v1/social/youtube/callback`. Use `localhost` for the frontend too (`http://localhost:5173` or `http://localhost:5174`). If you use `127.0.0.1` in the browser instead, use it consistently in the redirect URI and `.env`.
-3. Generate a Fernet key with `.venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`. In the local `.env`, set `SOCIAL_ENCRYPTION_KEY` to that value, set `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` from the new client, and set `YOUTUBE_REDIRECT_URI` to the exact registered URI. Set `SOCIAL_FRONTEND_URL` to the frontend address you use. Do not commit `.env` or change the Fernet key after connecting.
-4. Restart Django and the Celery worker after editing `.env`; both load it automatically. Keep Redis running. In the studio open **Schedule → Connect YouTube**, sign in with the added test user, choose the channel and approve the two requested scopes. The connected channel then appears under Connected accounts.
-
-Google's [Testing audience](https://support.google.com/cloud/answer/15549945) grants expire after seven days, so a test connection may require reconnection. Production OAuth verification is separate from local testing. The [YouTube Data API revision history](https://developers.google.com/youtube/data/revision_history) states that, since 2 November 2026, uploads from unverified API projects are no longer automatically forced private; YouTube account settings and other policy checks can still affect the result.
-
-The older manual draft workflow still requires source-permission and music-rights checks before approval. YouTube uploads use the [official resumable API](https://developers.google.com/youtube/data/reference/rest/v3/videos/insert); scheduled publication sends a future `status.publishAt` with `privacyStatus=private` as required by [YouTube's resource documentation](https://developers.google.com/youtube/data/reference/rest/v3/videos). Immediate uploads request public privacy; if the API keeps a video private, the queue marks it `uploaded_private` rather than claiming publication. A 5-minute Celery Beat status poll can confirm when the native schedule becomes public; run `celery -A backend beat` as an additional always-on service. OAuth verification and upload quota may still constrain actual publishing. The OAuth flow requests `youtube.upload` and `youtube.readonly` for channel identification and status checks. Live OAuth and uploads were **not** tested in this change. Review a test upload in a controlled channel before relying on this feature.
-
-Instagram connection and Reel publishing are deliberately disabled. Meta's [official API documentation](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api) requires an eligible professional account and a publicly reachable video URL for the media container; this loopback deployment has neither. No Reel or connected account is simulated. Local scheduling also cannot run while the computer or worker is off. A zero-subscription workflow can still incur electricity, storage, network, quota and, if explicitly enabled, inference costs.
-
-## API
-
-Interactive OpenAPI: `http://localhost:8000/api/docs`.
-
-1. `GET /api/v1/session` creates the private browser session and returns `csrf_token`.
-2. Send cookies and `X-CSRFToken` for mutating requests.
-3. `POST /api/v1/jobs` JSON example:
-
-```json
-{
-  "url": "https://www.youtube.com/watch?v=VIDEO_ID_11",
-  "rights_declaration": true,
-  "permission_reference": "Owned original recording",
-  "options": {
-    "caption_style": "minimal",
-    "require_captions": true,
-    "target_duration": 30,
-    "resolution": "720",
-    "layout": "preserve",
-    "mode": "source_highlight"
-  }
-}
+```sh
+cd backend
+# FFmpeg renders (generate_job, rerender_short, story render)
+../.venv/bin/celery -A backend worker -Q media -n media@%h --pool=solo --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
+# AI calls, publishing and anything on the default queue
+../.venv/bin/celery -A backend worker -Q ai,publish,celery -n ai@%h --concurrency=2 --prefetch-multiplier=1 --loglevel=INFO
 ```
 
-Use a real 11-character source ID. `POST /api/v1/uploads` accepts multipart `file`, `rights_declaration`, `permission_reference` and JSON-string `options`. Uploaded media is probed in the worker; extension alone is never trusted.
+Do not set the flag without both workers: routed tasks would wait in queues nobody reads.
 
-`GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/results`, `POST /jobs/{id}/cancel`, `POST /jobs/{id}/retry`, `POST /jobs/{id}/regenerate`, `POST /jobs/{id}/schedule-batch`, `GET /jobs/{id}/download` (all beneath `/api/v1`). Poll status every two seconds. `GET /jobs/{id}/analysis` exposes the saved candidate scores and sampled signals; routine polling omits those larger debug arrays. Progress is stage-based, with no invented ETA; cancellation takes effect at the next boundary, not during an active FFmpeg command. Polling is used instead of SSE.
+SQLite runs in WAL mode (`SQLITE_JOURNAL_MODE=wal`). Use `delete` on network filesystems, or PostgreSQL via `DATABASE_URL` (install `psycopg[binary]`) for heavier use.
 
-`GET /capabilities` reports available provider modes. `GET /social/accounts`, `/social/posts`, `/social/preferences`, `/social/suggestions`, and YouTube OAuth connect/callback expose the queue. `POST /social/posts` saves a draft; `PUT /social/posts/{id}` edits it; `POST /social/posts/{id}/approve` uploads after review. `GET /shorts/{id}`, `/metadata`, `/video`, `/thumbnail`, `/download`, `/captions?format=srt|ass`; `POST /shorts/{id}/metadata` requests new grounded metadata. The transcript editor can re-render an individual Short while source footage is retained; full-clip regeneration remains a job-level action. `GET /health` reports process/tool/configuration availability, not worker readiness.
+## System prerequisites
 
-`POST /api/generate-short` is retained as a deprecated alias for the new rights-aware asynchronous schema. The old blocking `{url}` contract is intentionally retired because it lacks the required rights declaration.
+| Install | What it unlocks | Without it |
+| --- | --- | --- |
+| `brew install ffmpeg-full` | FFmpeg with libx264 and **libass**: ASS captions with animation. Apple Silicon's `/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg` is auto-detected; otherwise set `FFMPEG_BIN` and `FFPROBE_BIN`. | The studio still renders. `CAPTION_RENDERER=auto` falls back to PNG-overlay captions. `CAPTION_RENDERER=ass` fails with `libass_required`. |
+| `brew install fribidi` | Complex-script shaping (raqm) for Pillow. **Required for Hindi/Devanagari cards and PNG captions.** | Latin-script text works. Devanagari text is not shaped correctly, so do not use Hindi until it is installed. |
+| `brew install whisper-cpp` plus a model | Local, offline transcription (`whisper-cli`). | See below. |
+| Redis | The Celery broker. | Jobs cannot be queued; the API reports `queue_unavailable`. |
+| Node 22+ | Front end, and public-YouTube extraction by yt-dlp (with the pinned `yt-dlp-ejs`). | No UI; URL downloads can fail (upload instead). |
 
-## Verification
+**Local transcription.** After `brew install whisper-cpp`, put a multilingual ggml model at `backend/.local/models/ggml-base-q5_1.bin` (for example from the [whisper.cpp model repository](https://huggingface.co/ggerganov/whisper.cpp); the checksum for that file is SHA-1 `a3733eda680ef76256db5fc5dd9de8629e62c5e7`). Use `LOCAL_WHISPER_BIN` and `LOCAL_WHISPER_MODEL` for other paths. **Without whisper-cpp and without a Groq key, Shorts that require captions fail with a clear error** instead of producing uncaptioned video. Turn `require_captions` off only for footage with no speech.
+
+## AI providers
+
+Every hosted call goes through a provider layer that applies the spending policy, records each call in a usage ledger, and starts a cooldown after a 429. `GET /api/v1/providers` shows each provider, whether it is usable, and why not. Nothing is fabricated: with no usable provider the relevant step reports the reason.
+
+| Provider | Used for | Billing class | On by default? | Env vars |
+| --- | --- | --- | --- | --- |
+| Local Whisper | Speech to text | Local | Yes, once installed | `LOCAL_WHISPER_BIN`, `LOCAL_WHISPER_MODEL` |
+| Groq | Text, speech to text, vision | Free tier (account-dependent) | Only when `GROQ_API_KEY` is set (then allowed unless `AI_ALLOW_FREE_TIER=false` or `GROQ_ENABLED=false`) | `GROQ_API_KEY`, `GROQ_ENABLED`, `GROQ_TEXT_MODEL`, `GROQ_SPEECH_MODEL`, `GROQ_VISION_MODEL` |
+| Gemini | Text, vision | Free tier | Only when key and a model id are set | `GEMINI_API_KEY`, `GEMINI_ENABLED`, `GEMINI_TEXT_MODEL`, `GEMINI_VISION_MODEL` |
+| Gemini TTS | Narration | Free tier | Only when key and model are set | `GEMINI_API_KEY`, `GEMINI_TTS_MODEL` |
+| Groq TTS (Orpheus) | English narration | Free tier | Only when key and model are set | `GROQ_API_KEY`, `GROQ_TTS_MODEL` |
+| Hugging Face | Text, speech to text, translation | Metered | **No**; needs `AI_ALLOW_PAID_PROVIDERS=true` | `HF_TOKEN`, `HF_PROVIDER`, `HF_TEXT_MODEL`, `HF_TRANSCRIPTION_MODEL`, `HF_TRANSLATION_MODEL` |
+| ElevenLabs | Narration | Paid | **No**; needs `AI_ALLOW_PAID_PROVIDERS=true` and `AI_DAILY_BUDGET_USD` above 0 | `ELEVENLABS_API_KEY`, `ELEVENLABS_MODEL`, `ELEVENLABS_VOICES`, `ELEVENLABS_PLAN_COMMERCIAL` |
+| Manual narration | Uploading your own audio | Local | Always | none |
+
+Default provider order per capability: speech to text `local_whisper, groq, huggingface`; text `groq, gemini, huggingface`; vision `groq, gemini`; translation `huggingface`; narration `manual`. Override with `AI_PROVIDER_ORDER_ASR|TEXT|VISION|TRANSLATION|TTS`.
+
+Caveats recorded with each provider. Limits and terms change, so **check the limits, pricing, regions and data terms in your own provider console before relying on any of them**:
+
+- **Local Whisper:** runs on your machine; accuracy depends on the model file you install. Language is auto-detected.
+- **Groq:** free tier is account-dependent and a paid plan bills. Whether the free tier requires a card is unverified. Strict JSON-schema output works only on some models; others fall back to plain JSON mode. Whisper uploads are capped at 25 MB on the free tier. Vision uses a preview model with at most three images per request. Groq TTS is preview, English only, uses 200-character requests, and its commercial-use terms for generated audio were not verified (assets are marked `unknown`).
+- **Gemini:** per-model free limits are unverified, and a key on a billing-enabled project is billed. On the free tier prompts and responses may be used to improve Google products and read by human reviewers, so do not send private material, and the free tier is not permitted for serving end users in the EEA, the UK or Switzerland. Model ids have no default; choose current ones from Google's docs. Hindi is listed for Gemini TTS but Hinglish quality is unverified.
+- **Hugging Face:** free accounts have no included inference credits and routed providers may bill, hence opt-in. It has no text-to-speech routing here. Model ids have no defaults because catalogue availability varies.
+- **ElevenLabs:** paid and opt-in. The free ElevenLabs plan has no commercial licence; generated audio is labelled restricted for monetised use unless you set `ELEVENLABS_PLAN_COMMERCIAL=true` for a plan that includes one. Hindi/Hinglish quality is unverified, and the cost figure is a conservative flat per-character estimate.
+
+### Zero-paid policy
+
+Paid or metered inference stays off unless you opt in:
+
+- `AI_ALLOW_PAID_PROVIDERS=false` (legacy name `AI_ALLOW_BILLABLE`, still honoured). Either set to `true` allows paid and metered providers.
+- `AI_ALLOW_FREE_TIER=true`. Set to `false` to use local providers only.
+- `AI_DAILY_BUDGET_USD=0`. A ceiling in USD for priced calls; 0 blocks them all.
+- Bounds on volume: `AI_MAX_CALLS_PER_JOB`, `AI_FREE_TIER_DAILY_CALLS`, `AI_DAILY_PAID_CALLS`, `AI_REQUEST_TIMEOUT`, `AI_MAX_RETRIES`, `AI_RATE_LIMIT_COOLDOWN_SECONDS`.
+- A usage ledger (database table) records each attempt with provider, capability, status, units and estimated cost. Cooldowns and daily counts are read from it, so the API and workers agree. Blocked attempts are recorded but are not counted as inference calls.
+
+The dollar figures are estimates. A spending cap on the provider side is still sensible.
+
+## Shorts Generator
+
+Input: a public YouTube video or Shorts URL (no playlists), or an uploaded file. You must tick the rights declaration; an optional permission reference is stored. The job returns `202` at once, a worker does the work, and the UI polls progress. Output is up to three non-overlapping 9:16 MP4s (720x1280 by default, 1080x1920 if the source is tall enough), each with a thumbnail, SRT/ASS captions, metadata and a QA report. Every finished job is `needs_review`.
+
+Highlight choice uses transparent heuristics: scene changes, silence, speech density, transcript signals and, where available, the most-replayed signal. That signal is **unofficial** (the "heatmap" in yt-dlp's metadata, not a documented YouTube API) and is absent for many videos; its weight is `REPLAY_WEIGHT`. `HIGHLIGHT_WEIGHTS` overrides all eight signal weights.
+
+Options (all optional; defaults reproduce the plain legacy render):
+
+- **Presets:** `gaming_hype`, `cinematic_gaming`, `viral_commentary`, `minimal_premium`, `split_screen_gaming`, or `none`. A preset sets sensible defaults for the rest.
+- **Composition:** `auto`, `blur_fill` (full frame over a blurred background), `center`, `dynamic_center`, `subject_follow`, `letterbox`, `split_screen`, `pip`. Reframing is **motion-based, not face detection**: `dynamic_center` and `subject_follow` follow where the picture is changing, which can be a menu or effect rather than a person. If there is nothing reliable to follow it falls back to a static crop. Use `blur_fill` to keep the whole HUD.
+- **Caption presets:** `auto`, `bold_gaming`, `cinematic`, `dynamic_creator`, `clean_commentary`, `bilingual`; older styles `gaming`, `minimal`, `cinematic`, `dynamic` still work. Subtitle mode: original, English, Hindi or bilingual. Word-level highlighting needs word timestamps, which most sources do not have; otherwise phrases are shown whole.
+- **Hook overlay:** a short on-screen opening line built from the transcript.
+- **Dead-air removal:** cuts long silences inside the chosen clip.
+- **Punch-ins:** gentle zoom moves on emphasised moments.
+- **Split screen and secondary assets:** `split_screen` and `pip` take a secondary video or image from your Media Library (`secondary_asset_id`). A `restricted` asset is refused; `unknown` or `permission_pending` assets are accepted but force rights review on the output. `facecam_corner` places a facecam. The secondary asset never changes the source's rights status.
+- **Other:** `target_duration` 20 to 60 seconds, `resolution`, `layout`, `content_category`, and `mode` (`source_highlight`, or `original_analysis` which needs an approved hosted text provider).
+
+QA checks dimensions, duration, audio, decode errors, black or frozen sections and loudness peaks, and writes flags such as "Static or frozen section detected". The score is a technical heuristic. It does not predict audience response. Caption accuracy and audio/video sync are not verified by the machine.
+
+## AI Story Studio
+
+Makes original videos *about* a source (not cuts of it). Everything is a step you trigger and can review. Each step is a background job (`GET /api/v1/jobs/{id}` to poll); only one story step per user runs at a time.
+
+1. **Create a project.** Give a YouTube URL (with a rights declaration), or paste a transcript. Choose language (`en`, `hi`, `hinglish`), content format (for example gaming news, gameplay analysis, myth vs fact), narration style, target length (20-30, 30-45 or 45-60 seconds) and 1 to 3 videos.
+2. **Analyse.** The source is split into sections, repeated information is collapsed, and claims are extracted. A text provider helps if one is usable; otherwise a deterministic extractor is used. Each claim has a status:
+   - `source_claim`: the source states it and a supporting quote was found verbatim in the text.
+   - `inferred`: a model inference, or a claim whose quote could not be found (downgraded).
+   - `verified`: you attached evidence (a URL or note) yourself. The studio does not fact-check.
+3. **Concepts.** The writer proposes up to six distinct angles; you select up to your video count.
+4. **Scripts.** An original script is written per concept, with claim markers. If no text provider is usable you get a clear `text_provider_unavailable` error listing reasons. **Manual path:** `POST /story/projects/{id}/scripts/manual` accepts your own script, which skips the writer entirely.
+5. **Quality score and regeneration.** Each script is scored 0 to 1 on structure, length fit, grounding (claims marked and numbers not invented), originality against the source, hook and readability. The pass mark is 0.70 and all hard gates must pass. **This is an editorial heuristic, not a prediction of views.** Regeneration is bounded: up to 3 attempts per round and 6 per script, and the feedback from the previous score is passed to the next attempt.
+6. **Approve** the script, which fixes the text.
+7. **Narration.** Choose one of: generate with a TTS provider (Gemini TTS, Groq TTS, ElevenLabs, subject to the policy above), upload your own recording, or attach an existing narration asset. Voice previews are cached for a day. Word timing is **approximate** (interpolated from the audio length), not forced alignment. Generated narration is marked synthetic: the YouTube draft sets `altered_content`, and the upload sends YouTube's `status.containsSyntheticMedia`.
+8. **Storyboard.** One scene per script section, timed from the narration. Visuals follow a rights hierarchy: your `owned` assets first, then `commercial_use_permitted`, then `attribution_required` (attribution is recorded and added to the post), then original motion-graphic cards (fact, comparison, callout, numbered list, title), which always work. Third-party `source_clip` scenes need a rights declaration, must be tied to a claim, and are capped at 35% of the runtime. You can edit scenes and swap assets.
+9. **Render.** Needs a usable FFmpeg; blocked if the storyboard uses a `restricted` asset. Outputs appear as story videos with a QA report and a rights status.
+
+### Rights gating in story videos
+
+A story video made only from your own work and generated graphics still starts at `manual_review_required`. Third-party footage, unknown or pending licences, or generated narration of unverified licensing force review. Publishing requires a documented rights review (see [Publishing Studio](#publishing-studio)). A story video built from a pasted transcript has no source video, so it can never be published on the "source declaration" basis; only a completed rights review counts.
+
+## Media Library
+
+Upload video, audio, music, sound effects, images and graphics (size and count limits apply; image dimensions are bounded; files are checked by content, not extension). Generated narration, graphics and ingested source clips also appear here with their origin. Assets are private to your session, soft-deleted first and purged later, and cannot be removed while a storyboard uses them.
+
+Each asset has one of six licence states:
+
+| State | Meaning | Effect |
+| --- | --- | --- |
+| `owned` | You made it or hold all rights. | Usable. |
+| `commercial_use_permitted` | A licence or permission allows commercial use. | Usable. |
+| `attribution_required` | Usable if credited. | Usable; attribution text is required and is added to posts. |
+| `permission_pending` | You have asked but not been told yes. | Usable for drafts; forces manual rights review. |
+| `unknown` | Default. You have not established the terms. | Usable for drafts; forces manual rights review. |
+| `restricted` | You may not use it commercially or at all. | Blocks story renders and publishing. |
+
+The licence is what *you* record, plus an optional reference and notes. The studio cannot verify it.
+
+## Publishing Studio
+
+Drafts, scheduling (timezone, preferred slots, suggested times), approval, queue, failures and connected accounts. A post can only be approved after its video has a completed rights review (`POST /shorts/{id}/rights-review` with the permission and music confirmations), or, for Shorts, the one-click "Schedule on YouTube" flow, which records `source_declaration` as the basis (your declaration, not a check). Assets with blocking licences, or needing attribution without text, block approval.
+
+### YouTube
+
+YouTube uses Google's [official OAuth web-server flow](https://developers.google.com/identity/protocols/oauth2/web-server) and the resumable upload API. Tokens and upload-session URIs are Fernet-encrypted. Future-dated posts upload as private with a native `publishAt`; immediate posts request public. If YouTube keeps a video private the post is marked `uploaded_private` rather than "published". A five-minute beat task confirms when a scheduled video goes public.
+
+1. In [Google Cloud](https://console.cloud.google.com/), create or select a project and enable **YouTube Data API v3**. In Google Auth Platform, configure Branding and an **External** Audience for a personal Google account. While the app is in Testing, add your Google account as a test user. In Data Access add `youtube.upload` and `youtube.readonly`.
+2. In Google Auth Platform, Clients, create an OAuth client of type **Web application**. Add this exact **Authorized redirect URI**: `http://localhost:8000/api/v1/social/youtube/callback`. Use `localhost` for the front end too (`http://localhost:5173` or `http://localhost:5174`). If you use `127.0.0.1` in the browser, use it consistently in the redirect URI and `.env`.
+3. Generate a Fernet key with `.venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`. In `.env` set `SOCIAL_ENCRYPTION_KEY` to it, set `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` from the new client, and set `YOUTUBE_REDIRECT_URI` to the exact registered URI. Set `SOCIAL_FRONTEND_URL` to the front-end address you use. Do not commit `.env` or change the key after connecting; losing it makes stored accounts unrecoverable.
+4. Restart Django and the worker after editing `.env`. Keep Redis, the worker and beat running. In the studio open **Publishing, Connect YouTube**, sign in with the added test user, choose the channel and approve the two scopes.
+
+Google's [Testing audience](https://support.google.com/cloud/answer/15549945) grants expire after seven days, so a test connection may need reconnecting. Production OAuth verification is separate. Per the [YouTube Data API revision history](https://developers.google.com/youtube/data/revision_history), from 2 November 2026 uploads from unverified API projects are no longer automatically forced private; account settings and other policy checks can still affect the result. Upload quota applies.
+
+### Instagram
+
+Instagram publishing uses the official Instagram API with Instagram Login. It is **off until you set it up**, and it needs more than YouTube:
+
+- A **Meta developer app** with Instagram product, `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET` and a registered `INSTAGRAM_REDIRECT_URI`.
+- An Instagram **professional** (business or creator) account, connected from the studio.
+- Meta **app review** for the publishing permission before accounts other than your own test accounts can use it. Check Meta's current requirements.
+- **`PUBLIC_MEDIA_BASE_URL`**: a public `https` address that serves `MEDIA_ROOT/public_reels` (and nothing else). Meta's servers fetch the video from a public URL; they cannot reach `localhost`. On a pure localhost setup, Instagram publishing is unavailable (`GET /api/v1/capabilities` then reports `instagram_publishing_available: false`).
+- Our own scheduler: Instagram has no native scheduling, so approved posts are published by a beat task (checked every minute) once `scheduled_at` passes. **The worker and beat must both be running at that time**, which means the computer must be on.
+
+`GET /api/v1/social/platforms` shows, per platform, whether it is configured, connected and able to publish, with the reason when not.
+
+## Rights and originality
+
+What the app records:
+
+- Your rights declaration and permission reference for each source (a declaration, not verified ownership).
+- Licence state, reference, notes and attribution text for each asset.
+- For each output, a rights block and a `rights_review_status` (`manual_review_required`, `rights_documented`, and so on), plus which assets and source clips it uses.
+- Whether narration was synthetic (disclosure flag for YouTube).
+
+What it cannot determine:
+
+- Whether you truly own or may use the source, music or footage.
+- Whether captions, crops, commentary or a rewrite make reuse permissible, or whether YouTube or Instagram will treat the video as original, monetisable or eligible for reuse.
+- Whether audio contains music or third-party material.
+
+AI rewriting is **not** copyright clearance. The originality check compares a script with the source transcript using word-sequence overlap and flags long copied runs; it is a heuristic, does not detect translation or cross-script copying, and says nothing about the images or audio. Review every output yourself before publishing.
+
+## API overview
+
+Interactive OpenAPI docs: `http://localhost:8000/api/docs`. Start with `GET /api/v1/session`, which creates the private browser session and returns `csrf_token`; send cookies and `X-CSRFToken` on mutating requests. Errors use `{error, message}`; validation errors (422) also keep the `detail` list. All routes are under `/api`.
+
+| Group | Main routes |
+| --- | --- |
+| System | `GET /v1/session`, `/v1/health`, `/v1/capabilities`, `/v1/providers` |
+| Shorts jobs | `POST /v1/jobs`, `POST /v1/uploads`, `GET /v1/jobs`, `/v1/jobs/{id}`, `/results`, `/analysis`, `POST /v1/jobs/{id}/cancel`, `/retry`, `/regenerate`, `GET /v1/jobs/{id}/download` (ZIP) |
+| Shorts and files | `GET /v1/shorts/{id}`, `/video`, `/thumbnail`, `/download`, `/captions?format=srt|ass`; metadata and transcript editing; `POST /v1/shorts/{id}/rights-review` |
+| Story | `/v1/story/projects` (create, update, delete), `.../analyze`, `.../claims/{id}`, `.../concepts/generate|select`, `.../scripts/generate|manual`, `/v1/story/scripts/{id}` (edit, approve, regenerate, narrate, narration, storyboard), `/v1/story/scenes/{id}`, `.../render` |
+| Narration | `GET /v1/narration/voices`, `POST /v1/narration/preview|synthesize|upload` |
+| Media Library | `/v1/assets` (list, upload), `/v1/assets/{id}` (get, patch, delete, `/file`, `/thumbnail`) |
+| Publishing | `/v1/social/accounts`, `/platforms`, `/posts` and `/posts/{id}` (`approve`, `cancel`, `metadata`), `/approve-batch`, `/preferences`, `/suggestions`, YouTube and Instagram `connect`/`callback`, `POST /v1/jobs/{id}/schedule-batch` |
+
+`POST /api/generate-short` remains as a deprecated alias for `POST /v1/jobs`.
+
+## Testing
 
 ```sh
 DJANGO_DEBUG=true .venv/bin/python backend/manage.py test api
@@ -158,42 +255,53 @@ npm --prefix frontend run lint
 npm --prefix frontend run build
 ```
 
-Backend integration creates a synthetic 62-second test pattern, encodes three distinct 720×1280 MP4s, decodes/probes each and checks cleanup/idempotency. A separate integration test burns actual animated ASS captions; it explicitly skips if libass is absent. No copyrighted YouTube footage is required.
+All provider, Meta and YouTube behaviour is tested with mocks; no network is used. Some tests skip rather than fail when the environment lacks something:
 
-With API, Redis and Celery running, exercise the entire asynchronous HTTP path:
+- `ffmpeg required`: the machine has no FFmpeg, so real encode tests are skipped.
+- `libass`: FFmpeg lacks libass, so the ASS caption burn-in tests are skipped.
+- `raqm (fribidi) not available`: Hindi/Devanagari shaping tests are skipped until `fribidi` is installed.
+- Two tests skip when your local `.env` sets `CELERY_SEPARATE_QUEUES` or AI policy variables, because they assert the defaults.
 
-```sh
-.venv/bin/python scripts/smoke.py
-```
+With the API, Redis and a worker running, `scripts/smoke.py` exercises the whole asynchronous HTTP path with a synthetic test pattern (no real footage). Run it manually.
 
-This creates an explicitly titled `SYNTHETIC-pipeline-test.mp4` history job, verifies immediate acceptance, follows actual worker progress, downloads three real MP4s and validates the batch ZIP. It does not present generated test patterns as actual user footage.
-
-## Retention and deployment
+## Retention and cleanup
 
 ```sh
 .venv/bin/python backend/manage.py cleanup_studio
-# Docker:
-docker compose exec api python manage.py cleanup_studio
+docker compose exec api python manage.py cleanup_studio    # Docker
 ```
 
-Schedule cleanup hourly. Source retention defaults to one day; terminal output retention to seven days. Cleanup marks abandoned jobs older than the job limit plus two minutes failed, prunes source directories and deletes expired terminal jobs/assets. Intermediate audio and partial renders are deleted in `finally`; source footage remains only until retention. Restarting or crashing a worker can leave a job in progress until this maintenance command runs. Losing browser session cookies loses access to its anonymous-session history.
+`cleanup_studio` marks abandoned jobs failed, deletes source footage after `SOURCE_RETENTION_DAYS` (default 1), deletes terminal jobs and their folders (Shorts and story jobs, including story jobs without a source video) after `OUTPUT_RETENTION_DAYS` (default 7) unless a draft or queued post still needs them, purges assets past their retention date (this includes cached narration previews, kept one day) and soft-deleted assets after seven days, and removes empty projects. Assets pinned or used in a storyboard are kept.
 
-For a reproducible local container stack:
+**Schedule it.** Either run it hourly from cron or launchd, or rely on the daily Celery beat task `api.tasks.cleanup_studio_task` (which calls the same command) as long as beat is running. If neither runs, nothing is deleted and a crashed worker can leave a job "in progress" indefinitely.
+
+## Docker Compose
 
 ```sh
-cp .env.example .env
-# Set a unique secret; local HTTP requires DJANGO_DEBUG=true for non-secure local cookies.
+cp .env.example .env     # set a unique secret; local HTTP needs DJANGO_DEBUG=true
 docker compose up --build
 ```
 
-Open `http://localhost:8080`. Redis isn't exposed; API isn't exposed directly; media is accessible only through ownership-checked API endpoints. Compose sets `CELERY_SEPARATE_QUEUES=true` (unless you set it yourself) and starts a `worker` on the `media` queue (concurrency one) and a `worker-ai` on `ai,publish,celery` (concurrency two), each limited to two CPUs/2 GB RAM, plus a `beat` service for periodic tasks. With the flag set to `false`, every task goes to `worker-ai`. The non-root API and worker share a private named volume, and a separate migration service runs first. Docker configuration is supplied but was **not run here** because the Docker CLI is unavailable.
+Open `http://localhost:8080`. Compose starts Redis, a migration service, the API, a `worker` on the `media` queue, a `worker-ai` on `ai,publish,celery`, `beat` and the web container. It sets `CELERY_SEPARATE_QUEUES=true` unless you override it. The configuration is validated, but **it has not been built or run here** (the Docker CLI was unavailable), so treat the first build as untested. It uses SQLite on a named volume for a single-host setup.
 
-For an Internet deployment, put this studio behind authenticated HTTPS access, set `DJANGO_DEBUG=false`, unique secret, exact hosts/origins and secure proxy settings. The included stack binds to loopback deliberately; anonymous browser sessions are not a full multi-user account system. Add durable account authentication and distributed admission/rate limits before public multi-tenant access. Use a restricted worker/egress policy, disk limits at the volume level, backups, monitored Redis and error monitoring. Do not expose Redis, `/data`, Django admin or media storage publicly. Review nginx upload/time limits to match backend limits.
+For anything exposed to the internet: HTTPS and real authentication in front (anonymous browser sessions are not an account system), `DJANGO_DEBUG=false`, a unique secret, exact hosts and origins, volume-level disk limits and backups. Do not expose Redis, the data volume or Django admin.
 
-Local runtime state lives in `backend/.local/studio.sqlite3`, outside the tracked original empty `db.sqlite3`.
+## Known limitations and unverified items
 
-Django's database uses `DATABASE_URL` via `dj-database-url`; PostgreSQL requires installing/pinning `psycopg[binary]` and supplying a production database URL. Compose intentionally uses SQLite for a single-worker initial deployment. An object-storage adapter, signed URLs, centralized daily cost accounting and production error-monitoring integration are not included. Dependency locks are committed for Python/npm; image tags are supplied rather than immutable production digests.
+- **No live call** to any hosted LLM, TTS, vision, Meta or YouTube API has been made in this upgrade. All of that behaviour is tested with mocks. Review a test upload in a controlled channel first.
+- **YouTube synthetic-media flag:** `status.containsSyntheticMedia` is documented in the YouTube Data API reference and is sent when a post is marked altered; the live effect has not been observed.
+- **Hindi rendering** is untested locally until `fribidi` (raqm) and libass are installed; those tests skip. Hinglish and Hindi TTS quality are unverified.
+- **Subject-follow** and dynamic crops are heuristic and motion-based; they are not face or object detection and can follow the wrong thing.
+- **Word-level caption highlighting** is rarely available because most transcripts only have phrase timing. **Narration word timing** is approximate.
+- **Most-replayed signal** is unofficial and absent for many videos.
+- **Story videos made mostly of static cards** can get a "Static or frozen section" QA flag; it is a prompt to review, not necessarily an error.
+- **Originality check** is word-overlap only: it does not detect translation or cross-script copying, and does not look at visuals or audio.
+- **Quality scores** are editorial heuristics, not predictions.
+- **Instagram** is unusable on a pure localhost setup (needs `PUBLIC_MEDIA_BASE_URL`, a Meta app, app review and a professional account), and needs worker plus beat running at the scheduled time.
+- **Provider limits and terms** (free-tier quotas, card requirements, regions, commercial use of generated audio) change and several are recorded as unverified; check them yourself.
+- **Docker** configuration is not built or run here.
+- **Rights:** declarations are not verified, and music and third-party content are not detected.
+- Cancellation takes effect at the next stage boundary, not mid-FFmpeg. The studio is single-user-per-browser-session, not a multi-user system.
+- Not implemented: object storage, signed URLs, cross-worker currency budgets beyond the ledger, production error monitoring.
 
-## Scope still open
-
-This is a working source-highlight release, not the complete aspirational product in `description.md`. Licensed TTS, user-recorded narration, Instagram publishing, remote vision inference, subject tracking/smoothed crop paths, automatic word alignment, automatic removal of silence within a selected clip, contextual graphic overlays, scene-aware multi-shot reconstruction, per-Short re-encoding, object storage and verified legal/monetization determinations remain unimplemented. Interface/provider protocols reserve the relevant boundaries; unsupported modes are rejected rather than simulated.
+`description.md` is the original prototype specification and no longer describes the product.

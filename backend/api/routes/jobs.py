@@ -79,12 +79,19 @@ class Error(Schema):
     message: str
 
 
+GLOBAL_ACTIVE_LIMIT = 10     # all pipelines together (shared with routes/story.py)
+HOURLY_SHORTS_JOBS = 6
+
+
 def capacity(owner):
+    """Shorts-pipeline limits: one active Shorts job per owner and 6 per hour. Story steps are counted separately
+    (see routes/story.py); only the global active cap is shared across pipelines."""
     disk_check(settings.MEDIA_ROOT)
-    active = GenerationJob.objects.exclude(status__in=TERMINAL).count()
-    if active >= 10 or GenerationJob.objects.filter(owner=owner).exclude(status__in=TERMINAL).count() >= 1:
+    mine = GenerationJob.objects.filter(owner=owner, pipeline='shorts')
+    if (GenerationJob.objects.exclude(status__in=TERMINAL).count() >= GLOBAL_ACTIVE_LIMIT
+            or mine.exclude(status__in=TERMINAL).exists()):
         raise HttpError(429, 'A generation is already active or the queue is full. Please wait.')
-    if GenerationJob.objects.filter(owner=owner, created_at__gte=timezone.now()-timedelta(hours=1)).count() >= 6:
+    if mine.filter(created_at__gte=timezone.now()-timedelta(hours=1)).count() >= HOURLY_SHORTS_JOBS:
         raise HttpError(429, 'Hourly generation limit reached. Try again later.')
 
 

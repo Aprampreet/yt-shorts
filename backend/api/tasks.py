@@ -173,9 +173,12 @@ def publish_youtube_post(post_id):
     try:
         if post.platform != 'youtube' or not post.social_account or post.social_account.connection_status != 'connected':
             raise StudioError('account_unavailable','A connected YouTube account is required.')
-        if not post.generated_short or not (
-            post.generated_short.rights_review_status == 'rights_documented' or
-            post.approval_basis == 'source_declaration' and post.generated_short.job.source.rights_declaration
+        short = post.generated_short
+        job = short.job if short and short.job_id else None
+        source = job.source if job is not None and job.source_id else None   # story videos may have no source
+        if not short or not (
+            short.rights_review_status == 'rights_documented' or
+            post.approval_basis == 'source_declaration' and source is not None and source.rights_declaration
         ):
             raise StudioError('rights_unresolved','The source rights declaration is unavailable.')
         video = settings.MEDIA_ROOT/post.generated_short.video_file
@@ -224,3 +227,10 @@ def refresh_youtube_publications():
                 ScheduledPost.objects.filter(pk=post.pk,status='scheduled').update(status='published',published_at=timezone.now(),last_error='')
         except Exception:
             log.exception('Could not confirm YouTube publication for %s',post.pk)
+
+
+@shared_task
+def cleanup_studio_task():
+    """Daily beat task: same as ``manage.py cleanup_studio`` so retention works without cron."""
+    from django.core.management import call_command
+    call_command('cleanup_studio')

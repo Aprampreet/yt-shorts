@@ -101,6 +101,10 @@ def youtube_upload(post, path):
             description = (description + '\n\n' + visible_tags)[:5000]
         body = {'snippet':{'title':post.title[:100],'description':description[:5000],
                            'tags':[tag.lstrip('#') for tag in post.hashtags]}, 'status':status}
+        # Disclosure of realistic altered/synthetic content: videos resource property status.containsSyntheticMedia
+        # (boolean, writable on videos.insert; confirmed in the YouTube Data API reference).
+        if (post.platform_metadata or {}).get('youtube', {}).get('altered_content'):
+            status['containsSyntheticMedia'] = True
         with httpx.Client(timeout=30) as client:
             response = client.post(UPLOAD_API,params={'uploadType':'resumable','part':'snippet,status'},
                 headers={**headers,'X-Upload-Content-Type':'video/mp4','X-Upload-Content-Length':str(size)},json=body)

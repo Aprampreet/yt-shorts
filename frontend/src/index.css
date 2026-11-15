@@ -2,6 +2,7 @@
 
 @import "./styles/tokens.css";
 @import "./styles/features.css";
+@import "./styles/story.css";
 
 :root {
   font-family:var(--jwd-font-sans);

@@ -10,7 +10,7 @@ from api.tasks import TERMINAL
 
 
 class Command(BaseCommand):
-    help = 'Expire abandoned jobs, prune source footage and remove expired terminal outputs. Schedule hourly.'
+    help = 'Expire abandoned jobs, prune source footage and remove expired terminal outputs. Narration preview assets and story job folders follow the same retention. Schedule hourly (cron) or rely on the daily Celery beat task.'
     def handle(self, **options):
         now = timezone.now()
         stale = now-timedelta(seconds=settings.JOB_TIMEOUT+120)
@@ -29,9 +29,9 @@ class Command(BaseCommand):
                 continue
             root = settings.MEDIA_ROOT/'jobs'/str(job.pk)
             shutil.rmtree(root, ignore_errors=True)
-            source = job.source
+            source = job.source          # story jobs may have no SourceVideo
             job.delete()
-            if not source.generationjob_set.exists():
+            if source is not None and not source.generationjob_set.exists():
                 source.delete()
             count += 1
         expired = purged = 0

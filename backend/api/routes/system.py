@@ -3,6 +3,7 @@ import shutil
 import uuid
 from django.middleware.csrf import get_token
 from ninja import Router
+from ..publishing import instagram
 
 router = Router()
 
@@ -45,7 +46,7 @@ def capabilities(request):
                 'reason':groq.get('reason', 'Groq adapter is not registered.')},
         'providers':snapshot['providers'],
         'youtube_oauth_configured':bool(os.getenv('YOUTUBE_CLIENT_ID') and os.getenv('YOUTUBE_CLIENT_SECRET') and os.getenv('SOCIAL_ENCRYPTION_KEY')),
-        'instagram_publishing_available':False,
+        'instagram_publishing_available':instagram.publishing_available(),
         'reason':('Local audio transcription is available; hosted analysis and translation require explicit billing approval.'
                   if local_asr and not approved else
                   'Install whisper-cli and a multilingual model for offline captions.' if not local_asr and not approved else '')}

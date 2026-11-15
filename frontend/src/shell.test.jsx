@@ -39,18 +39,26 @@ describe('App shell routes', () => {
     await waitFor(() => expect(api).toHaveBeenCalledWith('/jobs'));
   });
 
-  it('renders an honest empty AI Story Studio at /story', () => {
+  it('renders AI Story Studio at /story with an honest empty project list', async () => {
+    api.mockImplementation(path => (path === '/story/projects' ? Promise.resolve({ projects: [] }) : Promise.resolve([])));
     renderAt('/story');
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('From an idea');
-    expect(screen.getByText('Story Studio is not available yet in this build.')).toBeInTheDocument();
+    expect(await screen.findByText('No story projects yet.')).toBeInTheDocument();
+    expect(api).toHaveBeenCalledWith('/story/projects');
+    expect(screen.getByRole('button', { name: 'New project' })).toBeInTheDocument();
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
     expect(document.querySelector('video')).toBeNull();
   });
 
-  it('renders Story Studio for /story/:projectId without inventing project data', () => {
+  it('shows an honest error for /story/:projectId when the project does not exist', async () => {
+    api.mockImplementation(path => {
+      if (path === '/story/projects/abc123') return Promise.reject(Object.assign(new Error('Not Found'), { status: 404 }));
+      return Promise.resolve([]);
+    });
     renderAt('/story/abc123');
-    expect(screen.getByText('Story Studio is not available yet in this build.')).toBeInTheDocument();
-    expect(screen.getByText('abc123')).toBeInTheDocument();
+    expect(await screen.findByText('This project could not be opened.')).toBeInTheDocument();
+    expect(screen.getByText('This story project does not exist or was deleted.')).toBeInTheDocument();
+    expect(api).toHaveBeenCalledWith('/story/projects/abc123');
   });
 
   it('renders the Publishing Studio with the existing scheduler at /publish', async () => {

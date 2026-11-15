@@ -95,7 +95,7 @@ def social_platforms(request):
                    'can_publish':yt_configured and 'youtube' in connected,
                    'reason':('Set '+', '.join(yt_missing)+'.') if yt_missing else None if 'youtube' in connected else 'Connect a YouTube channel.'},
         'instagram':{'configured':ig_configured,'connected':'instagram' in connected,
-                     'can_publish':ig_configured and 'instagram' in connected and instagram.public_media_ready(),
+                     'can_publish':instagram.publishing_available() and 'instagram' in connected,
                      'reason':ig_publish_reason}}
 
 
