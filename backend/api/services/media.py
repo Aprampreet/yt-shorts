@@ -104,6 +104,24 @@ def disk_check(root):
     return used
 
 
+def sanitize_heatmap(raw, limit=200):
+    """yt-dlp 'most replayed' buckets -> [{s, e, v}] finite floats, max ``limit``; [] when absent/invalid."""
+    out = []
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            try:
+                s = float(item.get('start_time', item.get('s')))
+                e = float(item.get('end_time', item.get('e')))
+                v = float(item.get('value', item.get('v')))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if all(map(math.isfinite, (s, e, v))) and s >= 0 and e > s and v >= 0:
+                out.append({'s': round(s, 3), 'e': round(e, 3), 'v': round(v, 5)})
+    if len(out) > limit:
+        out = [out[int(i * len(out) / limit)] for i in range(limit)]
+    return out
+
+
 def download_sync(url, folder):
     import yt_dlp
     url = validate_youtube(url)
@@ -146,6 +164,7 @@ def download_sync(url, folder):
     if len(files) != 1:
         raise StudioError('download_incomplete', 'No complete video was downloaded. Upload the authorized source file instead.')
     metadata = {k: info.get(k) for k in ['id', 'title', 'description', 'uploader', 'channel', 'license', 'webpage_url', 'language']}
+    metadata['heatmap'] = sanitize_heatmap(info.get('heatmap'))
     metadata['subtitle_tracks'] = list((info.get('subtitles') or {}).keys())
     metadata['automatic_caption_tracks'] = list((info.get('automatic_captions') or {}).keys())
     return files[0], metadata

@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import EditingControls from './shorts/EditingControls';
+import { EDITING_DEFAULTS, usesSecondVideo } from './shorts/options';
 
 export default function InputCard({ onSubmit, busy, connected }) {
   const [tab, setTab] = useState('youtube');
@@ -6,11 +8,13 @@ export default function InputCard({ onSubmit, busy, connected }) {
   const [file, setFile] = useState(null);
   const [rights, setRights] = useState(false);
   const [reference, setReference] = useState('');
-  const [options, setOptions] = useState({ caption_style: 'minimal', subtitle_mode: 'original', require_captions: true, target_duration: 30, resolution: '720', layout: 'preserve', mode: 'source_highlight' });
+  const [options, setOptions] = useState({ caption_style: 'minimal', subtitle_mode: 'original', require_captions: true, target_duration: 30, resolution: '720', layout: 'preserve', mode: 'source_highlight', ...EDITING_DEFAULTS });
   const option = (key, value) => setOptions(old => ({ ...old, [key]: value }));
   function submit(event) {
     event.preventDefault();
-    onSubmit({ url, file: tab === 'upload' ? file : null, rights_declaration: rights, permission_reference: reference, options });
+    // A second video only applies to split-screen; never send a stale pick.
+    const sent = usesSecondVideo(options) ? options : { ...options, secondary_asset_id: null };
+    onSubmit({ url, file: tab === 'upload' ? file : null, rights_declaration: rights, permission_reference: reference, options: sent });
   }
   return <form className="input-card" onSubmit={submit}>
     <div className="source-tabs" role="tablist" aria-label="Source type"><button type="button" role="tab" aria-selected={tab === 'youtube'} onClick={() => setTab('youtube')}>YouTube URL</button><button type="button" role="tab" aria-selected={tab === 'upload'} onClick={() => setTab('upload')}>Upload footage</button><span>YOUR FOOTAGE. YOUR NEXT STORY.</span></div>
@@ -30,7 +34,9 @@ export default function InputCard({ onSubmit, busy, connected }) {
         <label>Output resolution<select value={options.resolution} onChange={e => option('resolution', e.target.value)}><option value="720">720 × 1280 · efficient</option><option value="1080">1080 × 1920 · source permitting</option></select></label>
         <label>Vertical framing<select value={options.layout} onChange={e => option('layout', e.target.value)}><option value="preserve">Full frame · blurred background</option><option value="center">Center crop · review action placement</option></select></label>
         <label className="wide">Permission or license reference<input value={reference} maxLength={2000} onChange={e => setReference(e.target.value)} placeholder="License reference, permission notes or ownership details" /></label>
-      </div><p className="option-note">Source Highlight mode preserves original audio. Captions are generated from its audio on the worker. Translation and original commentary need a configured provider; voice synthesis is not available in this release.</p>
+      </div>
+      <EditingControls options={options} onChange={option} disabled={busy} />
+      <p className="option-note">Source Highlight mode preserves original audio. Captions are generated from its audio on the worker. Translation and original commentary need a configured provider; voice synthesis is not available in this release.</p>
     </details>
   </form>;
 }

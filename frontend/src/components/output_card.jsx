@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api, asset } from './api';
+import TimelineSummary from './shorts/TimelineSummary';
 
 export default function OutputCard({ short, onUpdated, onRegenerate }) {
   const [message, setMessage] = useState('');
@@ -36,6 +37,7 @@ export default function OutputCard({ short, onUpdated, onRegenerate }) {
       <span className="clip-number">0{short.short_number}</span><span className="clip-length">{short.duration.toFixed(1)}s</span></div>
     <div className="result-body"><div className="eyebrow">SOURCE HIGHLIGHT · {start}</div><h3>{short.title}</h3>
       <div className="scores"><span>Highlight <b>{short.quality_report.highlight_score ?? '—'}</b></span><span>Technical QA <b>{short.quality_score}/100</b></span></div>
+      <TimelineSummary summary={short.timeline_summary} qaStatus={short.qa_status} />
       <div className="review-label">◌ Source rights declaration on file</div>
       <a className="button download" href={asset(short.download_url)}>↓ Download MP4</a>
       <div className="result-actions"><button onClick={() => copy(short.title)}>Copy title</button><button onClick={() => copy(short.description)}>Copy description</button>

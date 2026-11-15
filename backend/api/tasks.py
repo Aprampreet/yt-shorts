@@ -9,7 +9,7 @@ from .pipeline import highlights, ingest, shorts, transcribe
 from .pipeline.context import Cancelled, JobContext, relative, update  # noqa: F401  (re-exported)
 from .services.media import StudioError, probe, disk_check, run
 from .services.captions import write_captions
-from .services.providers import HuggingFaceProvider
+from .services.providers import HuggingFaceProvider  # noqa: F401  (re-exported for older imports)
 from .services.rendering import render_command, validate_output
 
 log = logging.getLogger(__name__)
@@ -26,14 +26,14 @@ def generate_job(job_id):
     job = GenerationJob.objects.select_related('source').get(pk=job_id)
     ctx = JobContext.create(job)
     try:
-        ctx.provider = HuggingFaceProvider()
+        ctx.attach_providers()
         disk_check(settings.MEDIA_ROOT)
         ingest.acquire_source(ctx)
         ingest.inspect_source(ctx)
         transcribe.transcribe(ctx)
         highlights.score_and_select(ctx)
         shorts.render_shorts(ctx)
-        shorts.finish_job(ctx, ctx.provider.calls)
+        shorts.finish_job(ctx, ctx.inference_calls())
     except Cancelled:
         log.info('Job cancelled: %s', job.id)
     except (StudioError, SoftTimeLimitExceeded) as exc:
@@ -55,6 +55,8 @@ def generate_job(job_id):
 def rerender_short(short_id):
     short = GeneratedShort.objects.select_related('job__source').get(pk=short_id)
     root = settings.MEDIA_ROOT/'jobs'/str(short.job_id)
+    if short.timeline:
+        return _rerender_from_timeline(short, root)
     source_folder = root/'source'
     source_files = [p for p in source_folder.iterdir() if p.suffix.lower() in {'.mp4','.mkv','.webm','.mov'}] if source_folder.exists() else []
     if len(source_files) != 1:
@@ -95,6 +97,69 @@ def rerender_short(short_id):
     finally:
         for path in folder.glob(f'edited-{short.id.hex}.*'):
             path.unlink(missing_ok=True)
+        (root/'renders'/f'{short.short_number}.edited.partial.mp4').unlink(missing_ok=True)
+
+
+def _rerender_from_timeline(short, root):
+    """Recompile the saved Timeline with captions rebuilt from the edited transcript segments.
+
+    Crops, cuts (dead-air removal), zooms and the hook overlay are reused exactly; only the
+    caption layer changes. Segments are stored in output time, so no remapping is needed.
+    """
+    from pathlib import Path
+    from .editing import presets
+    from .editing.render import render_timeline
+    from .editing.shorts_compiler import media_relative, recaption
+    folder = root/'captions'
+    tag = f'edited-{short.id.hex}'
+    output = root/'renders'/f'{short.short_number}.edited.mp4'
+    workdir = root/'renders'/f'.work-{tag}'
+    try:
+        media = [item.get('path') for item in short.timeline.get('provenance', []) if item.get('kind') in ('source', 'asset')]
+        if not media or not all((settings.MEDIA_ROOT/path).is_file() for path in media if path):
+            short.quality_report = dict(short.quality_report, transcript_edit_status='source_expired')
+            short.save(update_fields=['quality_report'])
+            return
+        cues = [dict(start=s.start_ms/1000, end=s.end_ms/1000, text=s.original_text,
+                     translated_english=s.translated_english, translated_hindi=s.translated_hindi,
+                     detected_language=s.detected_language, confidence=s.confidence) for s in short.segments.all()]
+        options = presets.resolve(short.job.settings)
+        legacy_style = short.job.settings.get('caption_style', 'minimal') if options.legacy else None
+        timeline, layer = recaption(short.timeline, cues, options, folder, tag, legacy_style)
+        if not layer['srt'] or not layer['srt'].read_text().strip():
+            raise StudioError('no_captions', 'The selected subtitle mode has no available text. Edit translations first.')
+        result = render_timeline(timeline, output, workdir)
+        output.replace(settings.MEDIA_ROOT/short.video_file)
+        caption_file = short.caption_file or relative(folder/f'{short.short_number}.srt')
+        layer['srt'].replace(settings.MEDIA_ROOT/caption_file)
+        data = timeline.model_dump(mode='json')
+        if layer['ass']:
+            final_ass = (settings.MEDIA_ROOT/caption_file).with_suffix('.ass')
+            layer['ass'].replace(final_ass)
+            data['captions']['ass_file'] = media_relative(final_ass)
+        data.pop('provenance', None)
+        from .editing.timeline import Timeline
+        saved = Timeline.model_validate(data)
+        summary = dict(short.quality_report.get('timeline_summary') or {}, caption_renderer=layer['renderer'])
+        short.timeline = saved.model_dump(mode='json')
+        short.caption_file = caption_file
+        short.qa_status = result.report.get('qa_status') or ''
+        short.transcript = ' '.join(s.original_text for s in short.segments.all())
+        short.quality_report = dict(short.quality_report, transcript_edit_status='ready',
+                                    edited_captions_revalidated=result.report['checks'],
+                                    qa_status=short.qa_status, timeline_summary=summary,
+                                    caption_renderer=layer['renderer'])
+        short.save(update_fields=['transcript', 'quality_report', 'timeline', 'caption_file', 'qa_status'])
+    except Exception as exc:
+        log.exception('Transcript re-render failed for %s', short.id)
+        short.quality_report = dict(short.quality_report, transcript_edit_status='failed',
+                                    transcript_edit_error=getattr(exc, 'message', 'Could not render edited captions. Check worker logs.'))
+        short.save(update_fields=['quality_report'])
+    finally:
+        for path in folder.glob(f'{tag}.*'):
+            path.unlink(missing_ok=True)
+        shutil.rmtree(workdir, ignore_errors=True)
+        Path(output).unlink(missing_ok=True)
         (root/'renders'/f'{short.short_number}.edited.partial.mp4').unlink(missing_ok=True)
 
 

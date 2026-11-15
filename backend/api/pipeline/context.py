@@ -52,6 +52,32 @@ class JobContext:
             folder.mkdir(parents=True, exist_ok=True)
         return cls(job=job, root=root, folders=folders, started=time.monotonic())
 
+    def attach_providers(self):
+        """``ctx.provider`` stays the Hugging Face provider (same analyze/translate/commentary/transcribe API),
+        now built by the registry so its calls pass the policy gate and land in the usage ledger."""
+        from ..providers import registry
+        self.provider = registry.get('huggingface', job=self.job)
+        return self.provider
+
+    def resolve(self, capability, **kwargs):
+        """First usable provider for ``capability`` (policy-checked, ledger-recorded for this job)."""
+        from ..providers import registry
+        return registry.resolve(capability, job=self.job, **kwargs)
+
+    def hosted(self, name):
+        """A specific registered provider bound to this job (e.g. 'groq'); check ``usable`` before calling."""
+        from ..providers import registry
+        return registry.get(name, job=self.job)
+
+    def usable(self, name, capability):
+        from ..providers import registry
+        return registry.usable(name, capability, job=self.job)
+
+    def inference_calls(self):
+        """Hosted inference requests recorded in the ledger for this job (what job.analysis reports)."""
+        from ..providers import ledger
+        return ledger.job_calls(self.job)
+
     def mark(self, name, before):
         self.timings[name] = round(time.monotonic()-before, 2)
         if time.monotonic()-self.started > settings.JOB_TIMEOUT:

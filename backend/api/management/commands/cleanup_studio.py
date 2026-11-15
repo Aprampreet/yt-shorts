@@ -4,7 +4,8 @@ from django.core.management.base import BaseCommand
 from django.conf import settings
 from django.utils import timezone
 from django.db.models import Q
-from api.models import GenerationJob
+from api.models import GenerationJob, GenerationProject, MediaAsset
+from api.services import assets as asset_service
 from api.tasks import TERMINAL
 
 
@@ -33,4 +34,23 @@ class Command(BaseCommand):
             if not source.generationjob_set.exists():
                 source.delete()
             count += 1
-        self.stdout.write(f'Removed {count} expired jobs; marked {lost} interrupted jobs failed.')
+        expired = purged = 0
+        for asset in MediaAsset.objects.filter(retention_until__lt=now, pinned=False, deleted_at__isnull=True).iterator():
+            if asset.scenes.exists():
+                continue
+            asset_service.remove_files(asset)
+            asset.delete()
+            expired += 1
+        for asset in MediaAsset.objects.filter(deleted_at__lt=now-timedelta(days=7)).iterator():
+            if asset.scenes.exists():
+                continue
+            asset_service.remove_files(asset)
+            asset.delete()
+            purged += 1
+        # Projects emptied by job expiry. Skip fresh ones and any with story content (concepts/scripts).
+        empty = GenerationProject.objects.filter(jobs__isnull=True, outputs__isnull=True, concepts__isnull=True,
+            scripts__isnull=True, created_at__lt=now-timedelta(days=1))
+        projects = empty.count()
+        GenerationProject.objects.filter(pk__in=list(empty.values_list('pk', flat=True))).delete()
+        self.stdout.write(f'Removed {count} expired jobs; marked {lost} interrupted jobs failed; expired {expired} assets, '
+                          f'purged {purged} deleted assets, removed {projects} empty projects.')

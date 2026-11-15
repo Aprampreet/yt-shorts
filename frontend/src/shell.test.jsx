@@ -59,9 +59,10 @@ describe('App shell routes', () => {
     expect(screen.getByText(/Instagram scheduling needs an always-on worker/)).toBeInTheDocument();
   });
 
-  it('renders an honest empty Media Library at /library', () => {
+  it('renders the Media Library at /library with an honest empty state', async () => {
     renderAt('/library');
-    expect(screen.getByText('The Media Library is not available yet in this build.')).toBeInTheDocument();
+    expect(await screen.findByText('Your library is empty.')).toBeInTheDocument();
+    expect(api).toHaveBeenCalledWith('/assets?limit=24&offset=0');
     expect(document.querySelector('video, img')).toBeNull();
   });
 

@@ -1,7 +1,10 @@
-"""Transcription: local whisper first, then bounded hosted chunks, then cue labelling."""
-import os
+"""Transcription: local whisper first, then bounded hosted chunks, then cue labelling.
+
+``transcribe_source`` is called directly (it is what ``providers.local_whisper`` wraps, and tests patch
+``api.pipeline.transcribe.transcribe_source``)."""
 import time
 
+from ..providers import Capability
 from ..services.languages import label_cues
 from ..services.local_transcription import transcribe_source
 from ..services.media import StudioError, run
@@ -20,7 +23,9 @@ def transcribe(ctx):
                 warnings.append('Locally generated speech captions need human accuracy review before publishing.')
         except StudioError as exc:
             warnings.append(exc.message)
-    if not cues and info['has_audio'] and os.getenv('HF_TOKEN') and os.getenv('HF_TRANSCRIPTION_MODEL'):
+    # Hosted fallback: the registry-built provider (policy gate + ledger inside request()). The configured
+    # check is env-only, as before, so a policy block still surfaces its message as a warning.
+    if not cues and info['has_audio'] and provider is not None and provider.availability(Capability.ASR).available:
         try:
             # Bounded 60-second mono chunks. Approximate timing is explicitly reported.
             for offset in range(0, int(info['duration'])+1, 60):

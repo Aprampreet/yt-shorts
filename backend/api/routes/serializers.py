@@ -12,7 +12,8 @@ def short_data(short):
             detected_language=seg.detected_language,confidence=seg.confidence) for seg in short.segments.all()],
         video_url=base+'/video', download_url=base+'/download', thumbnail_url=base+'/thumbnail',
         caption_url=base+'/captions' if short.caption_file else None,
-        project_id=str(short.project_id) if short.project_id else None, kind=short.kind, qa_status=short.qa_status)
+        project_id=str(short.project_id) if short.project_id else None, kind=short.kind, qa_status=short.qa_status,
+        timeline_summary=(short.quality_report or {}).get('timeline_summary'))
 
 
 def job_data(job):

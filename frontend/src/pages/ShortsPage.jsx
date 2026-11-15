@@ -6,6 +6,7 @@ import ProgressBar from '../components/progressbar';
 import { api, asset } from '../components/api';
 import { isTerminal } from '../hooks/useJobPolling';
 import PageHeading from '../layout/PageHeading';
+import ProviderStatus from '../components/shorts/ProviderStatus';
 
 const WAVEFORM = [18, 30, 20, 45, 65, 35, 80, 50, 28, 63, 90, 40, 60, 32, 18, 48, 70, 37, 24, 15];
 
@@ -93,6 +94,7 @@ export default function ShortsPage({ job, setJob, connected, loadHistory, setErr
       />
       {notices}
 
+      <ProviderStatus />
       <InputCard onSubmit={create} busy={busy} connected={connected} />
 
       {job && !isTerminal(job.status) && <ProgressBar job={job} onCancel={() => action('cancel')} />}

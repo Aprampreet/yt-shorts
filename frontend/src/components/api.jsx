@@ -15,7 +15,13 @@ export async function api(path, options = {}) {
   });
   let data;
   try { data = await response.json(); } catch { throw new Error('The server returned an unreadable response.'); }
-  if (!response.ok) throw new Error(data.message || (typeof data.detail === 'string' ? data.detail : 'Check the submitted fields and try again.'));
+  if (!response.ok) {
+    const error = new Error(data.message || (typeof data.detail === 'string' ? data.detail : 'Check the submitted fields and try again.'));
+    // Extra context for callers that need it (for example the 409 `projects` list on asset deletion).
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
   return data;
 }
 

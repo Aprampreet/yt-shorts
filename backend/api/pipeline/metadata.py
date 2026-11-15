@@ -2,10 +2,11 @@
 from ..services.groq import finalize_description, generate_metadata
 
 
-def clip_metadata(text, editorial, source_title, number):
-    """Return (title, description, hashtags, groq_metadata) for one rendered clip."""
+def clip_metadata(text, editorial, source_title, number, generate=generate_metadata):
+    """Return (title, description, hashtags, groq_metadata) for one rendered clip.
+    ``generate`` lets the pipeline pass the policy-gated, ledger-counted Groq call."""
     title = editorial['title_candidates'][0][:500] if editorial else (text[:85] or f'{source_title[:75]} · Highlight {number}')
-    groq_metadata = generate_metadata(text)
+    groq_metadata = generate(text)
     if groq_metadata:
         title = groq_metadata['title']
     hashtags = groq_metadata['hashtags'] if groq_metadata else editorial['hashtags'] if editorial else ['#Shorts']
