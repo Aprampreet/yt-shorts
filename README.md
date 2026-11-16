@@ -41,7 +41,7 @@ cp .env.example .env          # then edit; secrets stay in .env, which is not co
 .venv/bin/python backend/manage.py migrate
 ```
 
-Django and Celery load `.env` from the project root. Non-empty values already set in the terminal take precedence. Use `DJANGO_DEBUG=true` only on a local machine; with debug off a real `DJANGO_SECRET_KEY` is required.
+Django and Celery load `.env` from the project root. Non-empty values already set in the terminal take precedence. The API dev server (`runserver`) now also reloads when `.env` changes. Celery workers and beat do not, so restart them after editing `.env` (`scripts/dev.sh` restarts everything). Terminal exports still override `.env`. Use `DJANGO_DEBUG=true` only on a local machine; with debug off a real `DJANGO_SECRET_KEY` is required.
 
 Run each of these in its own terminal:
 

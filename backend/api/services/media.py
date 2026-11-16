@@ -129,10 +129,17 @@ def download_sync(url, folder):
     def bounded(progress):
         if progress.get('downloaded_bytes', 0) > settings.MAX_SOURCE_BYTES:
             raise StudioError('source_limit', 'Download exceeded the file-size limit.')
+    skipped = []  # yt-dlp skips a filtered video silently; remember why so the user is told.
     def permitted(info, *, incomplete=False):
-        if info.get('duration', 0) > settings.MAX_SOURCE_DURATION:
+        duration = info.get('duration') or 0
+        if duration > settings.MAX_SOURCE_DURATION:
+            skipped.append(('source_limit',
+                f'This video is {duration / 60:.0f} minutes long; the studio limit is '
+                f'{settings.MAX_SOURCE_DURATION / 60:.0f} minutes. Use a shorter video, upload a trimmed '
+                'file, or raise MAX_SOURCE_DURATION (and PROCESS_TIMEOUT / JOB_TIMEOUT) in .env.'))
             return 'Video exceeds duration limit'
         if info.get('is_live') or info.get('live_status') == 'is_live':
+            skipped.append(('source_unsupported', 'Live streams are not supported. Use a finished video.'))
             return 'Live streams are not supported'
     options = {'format': 'bv*[height<=1080]+ba/b[height<=1080]', 'outtmpl': str(folder / 'source.%(ext)s'),
                'merge_output_format': 'mp4', 'noplaylist': True, 'quiet': True, 'socket_timeout': 30,
@@ -162,6 +169,8 @@ def download_sync(url, folder):
                           'YouTube did not provide a downloadable stream. Check the worker log or upload an authorized original file.') from exc
     files = [p for p in folder.iterdir() if p.suffix.lower() in {'.mp4', '.webm', '.mkv', '.mov'}]
     if len(files) != 1:
+        if skipped:
+            raise StudioError(*skipped[0])
         raise StudioError('download_incomplete', 'No complete video was downloaded. Upload the authorized source file instead.')
     metadata = {k: info.get(k) for k in ['id', 'title', 'description', 'uploader', 'channel', 'license', 'webpage_url', 'language']}
     metadata['heatmap'] = sanitize_heatmap(info.get('heatmap'))

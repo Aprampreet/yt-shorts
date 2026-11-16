@@ -220,3 +220,60 @@ def paid_allowed() -> bool:
 
 def schema_of(schema: Any) -> dict:
     return schema.model_json_schema() if hasattr(schema, 'model_json_schema') else dict(schema)
+
+
+# Keywords kept in a strict (Groq / OpenAI-style) schema. Groq's structured-outputs guide (checked 2026-11-15)
+# documents types, object/array/enum, anyOf, $defs/$ref and nullable unions, requires every property in
+# ``required`` and ``additionalProperties: false`` on every object, and does not document length/size/format
+# keywords, so those are dropped. The response is still validated app-side against the original Pydantic model.
+STRICT_KEYWORDS = frozenset({'type', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'anyOf',
+                             '$defs', '$ref', 'description'})
+
+
+def strict_schema(schema: Any) -> dict:
+    """Pure: convert a Pydantic model (or JSON schema dict) into the strict structured-output subset.
+
+    * every object lists all its properties in ``required`` and sets ``additionalProperties: false``;
+    * unsupported keywords (minLength, maxLength, minItems, maxItems, pattern, format, default, title, examples,
+      minimum, maximum, ...) are dropped; ``const`` becomes a one-value ``enum``; ``oneOf`` becomes ``anyOf``;
+    * fields that had a default become required *without* being made nullable, so the model must emit a value of
+      the declared type (e.g. ``''`` or ``[]``); fields whose type already allows null keep their ``anyOf`` null
+      branch. This keeps the result valid for the unchanged Pydantic model (a null for a ``str`` would not be).
+    * ``$ref`` siblings are dropped (a ``$ref`` node stays a bare reference); ``$defs`` are kept at the root.
+    """
+    return _strict_node(schema_of(schema), root=True)
+
+
+def _strict_node(node, root=False):
+    if isinstance(node, list):
+        return [_strict_node(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    if '$ref' in node:
+        return {'$ref': node['$ref']}
+    out = {}
+    for key, value in node.items():
+        if key == 'const':
+            out['enum'] = [value]
+        elif key == 'oneOf':
+            out['anyOf'] = _strict_node(value)
+        elif key == 'allOf' and isinstance(value, list) and len(value) == 1:
+            out.update(_strict_node(value[0]))           # Pydantic wraps single refs this way
+        elif key in ('properties', '$defs') and isinstance(value, dict):
+            out[key] = {name: _strict_node(sub) for name, sub in value.items()}
+        elif key in ('items', 'anyOf'):
+            out[key] = _strict_node(value)
+        elif key in STRICT_KEYWORDS and key not in ('required', 'additionalProperties'):
+            out[key] = value
+    if not root:
+        out.pop('$defs', None)   # Pydantic only emits $defs at the root
+    types = out.get('type')
+    is_object = types == 'object' or (isinstance(types, list) and 'object' in types) or 'properties' in out
+    if is_object:
+        out.setdefault('type', 'object')
+        out.setdefault('properties', {})
+        out['required'] = list(out['properties'])
+        out['additionalProperties'] = False
+    if types == 'array' and 'items' not in out:
+        out['items'] = {'type': 'string'}
+    return out

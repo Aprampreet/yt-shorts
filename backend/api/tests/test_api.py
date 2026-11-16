@@ -155,6 +155,20 @@ class StorageAndUploadTests(TestCase):
         self.assertEqual(ctx.exception.code, 'source_access_restricted')
 
     @patch('yt_dlp.YoutubeDL')
+    def test_over_length_video_explains_the_limit_instead_of_a_generic_error(self, ydl):
+        from ..services.media import download_sync
+        def extract(url, download):
+            # yt-dlp consults match_filter, skips the video silently and downloads nothing.
+            ydl.call_args.args[0]['match_filter']({'duration': 2347})
+            return {'id': 'abcdefghijk', 'title': 'Long recap', 'duration': 2347}
+        ydl.return_value.__enter__.return_value.extract_info.side_effect = extract
+        with self.assertRaises(StudioError) as ctx:
+            download_sync('https://youtu.be/abcdefghijk', Path(self.tmp.name)/'source')
+        self.assertEqual(ctx.exception.code, 'source_limit')
+        self.assertIn('39 minutes', ctx.exception.message)
+        self.assertIn('MAX_SOURCE_DURATION', ctx.exception.message)
+
+    @patch('yt_dlp.YoutubeDL')
     def test_download_reports_connection_failure(self, ydl):
         from ..services.media import download_sync
         ydl.return_value.__enter__.return_value.extract_info.side_effect = Exception('Unable to download API page: timed out')
